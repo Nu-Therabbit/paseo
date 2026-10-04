@@ -218,6 +218,104 @@ function waitForEvent<TEvent extends AgentStreamEvent>(params: {
 
 describe("Codex app-server provider (local e2e)", () => {
   test.runIf(isCodexInstalled())(
+    "rewinding a steer message keeps the earlier prompt of its turn in model context",
+    async () => {
+      const cwd = mkdtempSync(path.join(os.tmpdir(), "codex-steer-rewind-cwd-"));
+      const codexHome = mkdtempSync(path.join(os.tmpdir(), "codex-steer-rewind-home-"));
+      const requestBodies: string[] = [];
+      let releaseFirstResponse: (() => void) | null = null;
+      const server = createServer((req, res) => {
+        const chunks: Buffer[] = [];
+        req.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+        req.on("end", () => {
+          if (req.method !== "POST" || req.url !== "/v1/responses") {
+            res.statusCode = 404;
+            res.end("not found");
+            return;
+          }
+          requestBodies.push(Buffer.concat(chunks).toString("utf8"));
+          const reply = () => {
+            res.statusCode = 200;
+            res.setHeader("content-type", "text/event-stream");
+            res.end(assistantMessageSse("done"));
+          };
+          if (requestBodies.length === 1) {
+            releaseFirstResponse = reply;
+          } else {
+            reply();
+          }
+        });
+      });
+      server.listen(0, "127.0.0.1");
+      await once(server, "listening");
+      const address = server.address();
+      if (!address || typeof address === "string") {
+        throw new Error("Expected TCP address for mock responses server");
+      }
+
+      try {
+        writeMockCodexConfig(codexHome, `http://127.0.0.1:${address.port}`);
+        const client = new CodexAppServerAgentClient(createTestLogger());
+        const session = await client.createSession(
+          { provider: "codex", cwd, modeId: "auto", model: "mock-model" },
+          { env: { CODEX_HOME: codexHome } },
+        );
+
+        try {
+          const userMessageIds = new Map<string, string>();
+          session.subscribe((event) => {
+            if (
+              event.type === "timeline" &&
+              event.item.type === "user_message" &&
+              event.item.messageId
+            ) {
+              userMessageIds.set(event.item.text, event.item.messageId);
+            }
+          });
+          const turnFinished = waitForEvent({
+            session,
+            timeoutMs: 15_000,
+            label: "turn completion",
+            predicate: (event): event is Extract<AgentStreamEvent, { type: "turn_completed" }> =>
+              event.type === "turn_completed",
+          });
+
+          const started = await session.startTurn("ORIGINAL_PROMPT");
+          await vi.waitFor(() => expect(releaseFirstResponse).not.toBeNull(), {
+            timeout: 15_000,
+          });
+          await expect(
+            session.steerActiveTurn!("STEER_PROMPT", { expectedTurnId: started.turnId }),
+          ).resolves.toEqual({ status: "accepted" });
+          releaseFirstResponse!();
+          await turnFinished;
+
+          await vi.waitFor(() => expect(userMessageIds.get("STEER_PROMPT")).toBeDefined(), {
+            timeout: 15_000,
+          });
+          // Codex can only fork at a turn boundary, so a rewind that cannot keep
+          // ORIGINAL_PROMPT has to refuse rather than silently drop it.
+          await session.revertConversation!({
+            messageId: userMessageIds.get("STEER_PROMPT")!,
+          }).catch(() => undefined);
+
+          await session.run("AFTER_REWIND");
+          expect(requestBodies.at(-1)).toContain("AFTER_REWIND");
+          expect(requestBodies.at(-1)).toContain("ORIGINAL_PROMPT");
+        } finally {
+          await session.close();
+        }
+      } finally {
+        server.closeAllConnections();
+        server.close();
+        rmSync(cwd, { recursive: true, force: true });
+        rmSync(codexHome, { recursive: true, force: true });
+      }
+    },
+    45_000,
+  );
+
+  test.runIf(isCodexInstalled())(
     "reloads a persisted idle thread repeatedly without overlapping writers",
     async () => {
       const cwd = mkdtempSync(path.join(os.tmpdir(), "codex-reload-cwd-"));

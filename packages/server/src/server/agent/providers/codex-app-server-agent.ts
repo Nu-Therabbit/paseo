@@ -91,7 +91,7 @@ import {
   type CodexThreadRollbackResponse,
   type CodexAppServerTraceContext,
 } from "./codex/app-server-transport.js";
-import { type CodexUserMessageTurnIndex, revertCodexConversation } from "./codex/rewind.js";
+import { type CodexUserMessage, revertCodexConversation } from "./codex/rewind.js";
 import {
   materializeProviderImage,
   renderProviderImageOutputAsAssistantMarkdown,
@@ -4532,16 +4532,11 @@ export class CodexAppServerAgentSession implements AgentSession {
     });
   }
 
-  private codexUserMessageTurns(): CodexUserMessageTurnIndex {
-    return {
-      resolve: (messageId) => {
-        const index = this.userMessageTurnIndexes.get(messageId);
-        return index === undefined
-          ? null
-          : { index, turnId: this.userMessageProviderTurnIds.get(messageId) ?? null };
-      },
-      count: () => this.userMessageTurnIds.length,
-    };
+  private codexUserMessages(): CodexUserMessage[] {
+    return this.userMessageTurnIds.map((messageId) => ({
+      messageId,
+      turnId: this.userMessageProviderTurnIds.get(messageId) ?? null,
+    }));
   }
 
   subscribe(callback: (event: AgentStreamEvent) => void): () => void {
@@ -4953,19 +4948,6 @@ export class CodexAppServerAgentSession implements AgentSession {
       await this.ensureThread();
     }
 
-    const targetTurnId = this.userMessageProviderTurnIds.get(input.messageId);
-    if (targetTurnId) {
-      const firstMessageId = this.userMessageTurnIds.find(
-        (messageId) => this.userMessageProviderTurnIds.get(messageId) === targetTurnId,
-      );
-      // Codex forks at turn boundaries; a steer cannot be removed independently.
-      if (firstMessageId !== input.messageId) {
-        throw new Error(
-          "Codex cannot rewind a message sent during a turn without removing earlier messages. Select the first message in the turn instead.",
-        );
-      }
-    }
-
     await revertCodexConversation({
       client: this.client,
       threadId: this.currentThreadId,
@@ -4974,7 +4956,7 @@ export class CodexAppServerAgentSession implements AgentSession {
       model: this.config.model ?? null,
       serviceTier: this.serviceTier,
       config: this.buildCodexInnerConfig(),
-      userMessageTurns: this.codexUserMessageTurns(),
+      userMessages: this.codexUserMessages(),
       threadRollbackAvailable: this.threadRollbackAvailable,
       setThreadId: async (threadId) => {
         this.currentThreadId = threadId;

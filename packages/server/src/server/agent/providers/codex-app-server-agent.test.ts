@@ -107,10 +107,7 @@ interface CollaborationModeRecord {
 }
 
 interface CodexSessionTestAccess {
-  codexUserMessageTurns(): {
-    resolve(messageId: string): { index: number; turnId: string | null } | null;
-    count(): number;
-  };
+  codexUserMessages(): { messageId: string; turnId: string | null }[];
   ensureThreadLoaded(): Promise<void>;
   handleToolApprovalRequest(params: unknown): Promise<unknown>;
   handleNotification(method: string, params: unknown): void;
@@ -4694,10 +4691,9 @@ describe("Codex app-server provider", () => {
 
     await asInternals(session).loadPersistedHistory(session.client);
 
-    expect(asInternals(session).codexUserMessageTurns().resolve("message-history")).toEqual({
-      index: 0,
-      turnId: "native-turn-1",
-    });
+    expect(asInternals(session).codexUserMessages()).toEqual([
+      { messageId: "message-history", turnId: "native-turn-1" },
+    ]);
   });
 
   test("loads mixed legacy and MultiAgentV2 sub-agent history", async () => {
