@@ -320,11 +320,9 @@ describe("Codex app-server provider (local e2e)", () => {
           await vi.waitFor(() => expect(userMessageIds.get("STEER_PROMPT")).toBeDefined(), {
             timeout: 15_000,
           });
-          // Codex can only fork at a turn boundary, so a rewind that cannot keep
-          // ORIGINAL_PROMPT has to refuse rather than silently drop it.
-          await session.revertConversation!({
-            messageId: userMessageIds.get("STEER_PROMPT")!,
-          }).catch(() => undefined);
+          await expect(
+            session.revertConversation!({ messageId: userMessageIds.get("STEER_PROMPT")! }),
+          ).rejects.toThrow("Select the first message in the turn instead");
 
           await session.run("AFTER_REWIND");
           expect(mockServer.requestBodies.at(-1)).toContain("AFTER_REWIND");
