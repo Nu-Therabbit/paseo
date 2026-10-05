@@ -5,6 +5,7 @@ import { normalizeProviderReplayTimestamp } from "../../../provider-history-time
 import type { ProviderSubagentStatus } from "../../../provider-subagents/store.js";
 import { isClaudeInterruptPlaceholderText } from "../interrupt-placeholder.js";
 import { resolveObservedClaudeModelId } from "../models.js";
+import { readClaudeSubagentActionLog } from "../sidechain-tracker.js";
 import type { SubagentObservation } from "./observation.js";
 import { buildClaudeSubagentSubtitle, type ClaudeSubagentUsage } from "./presentation.js";
 
@@ -351,9 +352,15 @@ export function observeReplaySubagents(input: {
   subagents: readonly ClaudeReplaySubagentInput[];
   parent: ClaudeReplayParentFacts;
   convertEntry: (entry: ClaudeReplayEntry) => AgentTimelineItem[];
-}): { observations: SubagentObservation[]; toolOwners: ReadonlyMap<string, string> } {
+}): {
+  observations: SubagentObservation[];
+  toolOwners: ReadonlyMap<string, string>;
+  /** Root subagent id -> the action log its card in the parent transcript shows. */
+  actionLogs: ReadonlyMap<string, string>;
+} {
   const observations: SubagentObservation[] = [];
   const toolOwners = new Map<string, string>();
+  const actionLogs = new Map<string, string>();
   const unresolved = [...input.subagents].sort(
     (left, right) => (left.meta?.spawnDepth ?? 1) - (right.meta?.spawnDepth ?? 1),
   );
@@ -374,13 +381,14 @@ export function observeReplaySubagents(input: {
 
       // Only proven descendants may own notifications; ambient sidecars cannot claim them.
       recordReplayToolOwners(toolOwners, subagent.entries, link.id);
+      if (!ownerId) actionLogs.set(link.id, readClaudeSubagentActionLog(subagent.entries));
       observations.push(...observeSubagent(subagent, parent, input.convertEntry, ownerId));
       if (subagent.parentFacts) resolvedParents.set(link.id, subagent.parentFacts);
       unresolved.splice(index, 1);
       madeProgress = true;
     }
   }
-  return { observations, toolOwners };
+  return { observations, toolOwners, actionLogs };
 }
 
 function resolveReplayOwner(

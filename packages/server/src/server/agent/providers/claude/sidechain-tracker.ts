@@ -61,6 +61,81 @@ function isClaudeContentChunk(value: unknown): value is ClaudeContentChunk {
   );
 }
 
+function isToolUseChunk(block: ClaudeContentChunk): block is ClaudeContentChunk & { name: string } {
+  return (
+    (block.type === "tool_use" ||
+      block.type === "mcp_tool_use" ||
+      block.type === "server_tool_use") &&
+    typeof block.name === "string"
+  );
+}
+
+function normalizeSubAgentText(value: unknown): string | undefined {
+  const normalized = readTrimmedString(value)?.replace(/\s+/g, " ");
+  if (!normalized) {
+    return undefined;
+  }
+  if (normalized.length <= MAX_SUB_AGENT_SUMMARY_CHARS) {
+    return normalized;
+  }
+  return `${normalized.slice(0, MAX_SUB_AGENT_SUMMARY_CHARS)}...`;
+}
+
+function deriveSubAgentActionSummary(toolName: string, input: unknown): string | undefined {
+  const runningToolCall = mapClaudeRunningToolCall({
+    name: toolName,
+    callId: `sub-agent-summary-${toolName}`,
+    input,
+    output: null,
+  });
+  if (!runningToolCall) {
+    return undefined;
+  }
+  const display = buildToolCallDisplayModel({
+    name: runningToolCall.name,
+    status: runningToolCall.status,
+    error: runningToolCall.error,
+    detail: runningToolCall.detail,
+    metadata: runningToolCall.metadata,
+  });
+  return normalizeSubAgentText(display.summary);
+}
+
+/** The action log on the parent's card for a subagent, one line per tool the child called. */
+function formatSubAgentActionLog(
+  actions: readonly { toolName: string; summary?: string }[],
+): string {
+  return actions
+    .map((action) =>
+      action.summary ? `[${action.toolName}] ${action.summary}` : `[${action.toolName}]`,
+    )
+    .join("\n");
+}
+
+/**
+ * Rebuild a subagent card's action log from the child's persisted transcript, matching the log
+ * the live tracker builds from the same tool calls as they stream.
+ */
+export function readClaudeSubagentActionLog(
+  entries: readonly { type?: unknown; message?: { content?: unknown } }[],
+): string {
+  const actionsById = new Map<string, { toolName: string; summary?: string }>();
+  for (const entry of entries) {
+    const content = entry.type === "assistant" ? entry.message?.content : undefined;
+    if (!Array.isArray(content)) continue;
+    for (const block of content) {
+      if (!isClaudeContentChunk(block) || !isToolUseChunk(block)) continue;
+      const toolName = readTrimmedString(block.name);
+      if (!toolName) continue;
+      const key = readTrimmedString(block.id) ?? `assistant:${toolName}:${actionsById.size}`;
+      if (actionsById.has(key)) continue;
+      const summary = deriveSubAgentActionSummary(toolName, block.input ?? null);
+      actionsById.set(key, { toolName, ...(summary ? { summary } : {}) });
+    }
+  }
+  return formatSubAgentActionLog([...actionsById.values()].slice(-MAX_SUB_AGENT_LOG_ENTRIES));
+}
+
 export class ClaudeSidechainTracker {
   private readonly activeSidechains = new Map<string, SubAgentActivityState>();
   private readonly getToolInput: (toolUseId: string) => AgentMetadata | null | undefined;
@@ -145,11 +220,7 @@ export class ClaudeSidechainTracker {
       type: "sub_agent",
       ...(state.subAgentType ? { subAgentType: state.subAgentType } : {}),
       ...(state.description ? { description: state.description } : {}),
-      log: state.actions
-        .map((action) =>
-          action.summary ? `[${action.toolName}] ${action.summary}` : `[${action.toolName}]`,
-        )
-        .join("\n"),
+      log: formatSubAgentActionLog(state.actions),
       actions: [],
     };
 
@@ -329,9 +400,9 @@ export class ClaudeSidechainTracker {
     parentToolUseId: string,
   ): boolean {
     const taskInput = this.getToolInput(parentToolUseId);
-    const nextName = this.normalizeSubAgentText(taskInput?.name);
-    const nextSubAgentType = this.normalizeSubAgentText(taskInput?.subagent_type);
-    const nextDescription = this.normalizeSubAgentText(taskInput?.description);
+    const nextName = normalizeSubAgentText(taskInput?.name);
+    const nextSubAgentType = normalizeSubAgentText(taskInput?.subagent_type);
+    const nextDescription = normalizeSubAgentText(taskInput?.description);
 
     let changed = false;
     if (nextName && nextName !== state.name) {
@@ -349,17 +420,6 @@ export class ClaudeSidechainTracker {
     return changed;
   }
 
-  private normalizeSubAgentText(value: unknown): string | undefined {
-    const normalized = readTrimmedString(value)?.replace(/\s+/g, " ");
-    if (!normalized) {
-      return undefined;
-    }
-    if (normalized.length <= MAX_SUB_AGENT_SUMMARY_CHARS) {
-      return normalized;
-    }
-    return `${normalized.slice(0, MAX_SUB_AGENT_SUMMARY_CHARS)}...`;
-  }
-
   private extractAssistantMessageActions(
     message: Extract<SDKMessage, { type: "assistant" }>,
   ): SubAgentActionCandidate[] {
@@ -369,15 +429,7 @@ export class ClaudeSidechainTracker {
     }
     const actions: SubAgentActionCandidate[] = [];
     for (const block of content) {
-      if (
-        !isClaudeContentChunk(block) ||
-        !(
-          block.type === "tool_use" ||
-          block.type === "mcp_tool_use" ||
-          block.type === "server_tool_use"
-        ) ||
-        typeof block.name !== "string"
-      ) {
+      if (!isClaudeContentChunk(block) || !isToolUseChunk(block)) {
         continue;
       }
       const key = readTrimmedString(block.id) ?? `assistant:${block.name}:${actions.length}`;
@@ -398,15 +450,7 @@ export class ClaudeSidechainTracker {
       return [];
     }
     const block = isClaudeContentChunk(event.content_block) ? event.content_block : null;
-    if (
-      !block ||
-      !(
-        block.type === "tool_use" ||
-        block.type === "mcp_tool_use" ||
-        block.type === "server_tool_use"
-      ) ||
-      typeof block.name !== "string"
-    ) {
+    if (!block || !isToolUseChunk(block)) {
       return [];
     }
     const key =
@@ -457,7 +501,7 @@ export class ClaudeSidechainTracker {
       return false;
     }
 
-    const summary = this.deriveSubAgentActionSummary(normalizedToolName, candidate.input);
+    const summary = deriveSubAgentActionSummary(normalizedToolName, candidate.input);
     const existingIndex = state.actionIndexByKey.get(candidate.key);
 
     if (existingIndex !== undefined) {
@@ -507,25 +551,5 @@ export class ClaudeSidechainTracker {
         state.actionIndexByKey.set(key, index);
       }
     }
-  }
-
-  private deriveSubAgentActionSummary(toolName: string, input: unknown): string | undefined {
-    const runningToolCall = mapClaudeRunningToolCall({
-      name: toolName,
-      callId: `sub-agent-summary-${toolName}`,
-      input,
-      output: null,
-    });
-    if (!runningToolCall) {
-      return undefined;
-    }
-    const display = buildToolCallDisplayModel({
-      name: runningToolCall.name,
-      status: runningToolCall.status,
-      error: runningToolCall.error,
-      detail: runningToolCall.detail,
-      metadata: runningToolCall.metadata,
-    });
-    return this.normalizeSubAgentText(display.summary);
   }
 }
