@@ -119,7 +119,7 @@ function formatSubAgentActionLog(
 export function readClaudeSubagentActionLog(
   entries: readonly { type?: unknown; message?: { content?: unknown } }[],
 ): string {
-  const actionsById = new Map<string, { toolName: string; summary?: string }>();
+  const callsById = new Map<string, { toolName: string; input: unknown }>();
   for (const entry of entries) {
     const content = entry.type === "assistant" ? entry.message?.content : undefined;
     if (!Array.isArray(content)) continue;
@@ -127,13 +127,18 @@ export function readClaudeSubagentActionLog(
       if (!isClaudeContentChunk(block) || !isToolUseChunk(block)) continue;
       const toolName = readTrimmedString(block.name);
       if (!toolName) continue;
-      const key = readTrimmedString(block.id) ?? `assistant:${toolName}:${actionsById.size}`;
-      if (actionsById.has(key)) continue;
-      const summary = deriveSubAgentActionSummary(toolName, block.input ?? null);
-      actionsById.set(key, { toolName, ...(summary ? { summary } : {}) });
+      const key = readTrimmedString(block.id) ?? `assistant:${toolName}:${callsById.size}`;
+      if (callsById.has(key)) continue;
+      callsById.set(key, { toolName, input: block.input ?? null });
     }
   }
-  return formatSubAgentActionLog([...actionsById.values()].slice(-MAX_SUB_AGENT_LOG_ENTRIES));
+  const actions = [...callsById.values()]
+    .slice(-MAX_SUB_AGENT_LOG_ENTRIES)
+    .map(({ toolName, input }) => ({
+      toolName,
+      summary: deriveSubAgentActionSummary(toolName, input),
+    }));
+  return formatSubAgentActionLog(actions);
 }
 
 export class ClaudeSidechainTracker {
