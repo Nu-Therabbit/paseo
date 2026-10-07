@@ -122,7 +122,8 @@ function hasPaseoCommands(
 ): boolean {
   return (
     commandFieldContainsMarker(hook.command, marker) &&
-    windowsCommandContainsMarker(hook, marker, expectedWindowsCommand)
+    (hook.commandWindows === expectedWindowsCommand ||
+      hook.command_windows === expectedWindowsCommand)
   );
 }
 
@@ -132,17 +133,10 @@ function commandContainsMarker(hook: CodexCommandHook, marker: string): boolean 
   );
 }
 
-function windowsCommandContainsMarker(
-  hook: CodexCommandHook,
-  marker: string,
-  expectedWindowsCommand?: string,
-): boolean {
+function windowsCommandContainsMarker(hook: CodexCommandHook, marker: string): boolean {
   return (
     commandFieldContainsMarker(hook.commandWindows, marker) ||
-    commandFieldContainsMarker(hook.command_windows, marker) ||
-    (expectedWindowsCommand !== undefined &&
-      (hook.commandWindows === expectedWindowsCommand ||
-        hook.command_windows === expectedWindowsCommand))
+    commandFieldContainsMarker(hook.command_windows, marker)
   );
 }
 
