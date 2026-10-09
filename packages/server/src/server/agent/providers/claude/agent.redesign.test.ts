@@ -2067,19 +2067,26 @@ function streamFrame(event: Record<string, unknown>) {
   return { type: "stream_event", parent_tool_use_id: null, event };
 }
 
-function streamedBlock(index: number, kind: "thinking" | "text", deltas: string[]) {
+// A block's start and deltas. Its stop is separate because the SDK sends the block's snapshot
+// before content_block_stop.
+function streamedBlock(input: { index: number; kind: "thinking" | "text"; deltas: string[] }) {
+  const { index, kind, deltas } = input;
   const deltaType = kind === "thinking" ? "thinking_delta" : "text_delta";
   return [
     streamFrame({ type: "content_block_start", index, content_block: { type: kind, [kind]: "" } }),
     ...deltas.map((text) =>
       streamFrame({ type: "content_block_delta", index, delta: { type: deltaType, [kind]: text } }),
     ),
-    streamFrame({ type: "content_block_stop", index }),
   ];
 }
 
+function blockStop(index: number) {
+  return streamFrame({ type: "content_block_stop", index });
+}
+
 // The SDK's per-block assistant message: same message id as its siblings, one block of content.
-function blockSnapshot(uuid: string, kind: "thinking" | "text", text: string) {
+function blockSnapshot(input: { uuid: string; kind: "thinking" | "text"; text: string }) {
+  const { uuid, kind, text } = input;
   return {
     type: "assistant",
     uuid,
@@ -2133,24 +2140,41 @@ async function runScriptedTurn(frames: Record<string, unknown>[]): Promise<Agent
 }
 
 // Each chunk as emitted, so a test sees duplicates and lost chunks, not just the final text.
-function emittedChunks(
-  items: AgentTimelineItem[],
-  type: "reasoning" | "assistant_message",
-): string[] {
+function emittedChunks(input: {
+  items: AgentTimelineItem[];
+  type: "reasoning" | "assistant_message";
+}): string[] {
+  const { items, type } = input;
   return items.flatMap((item) => (item.type === type ? [item.text] : []));
 }
 
+const MESSAGE_START = streamFrame({
+  type: "message_start",
+  message: { id: "msg-multi", role: "assistant" },
+});
+const MESSAGE_STOP = streamFrame({ type: "message_stop" });
+
 test("shows each thinking block of a multi-block message once", async () => {
   const items = await runScriptedTurn([
-    streamFrame({ type: "message_start", message: { id: "msg-multi", role: "assistant" } }),
-    ...streamedBlock(0, "thinking", ["First paragraph.\n\n", "Second paragraph.\n\n"]),
-    blockSnapshot("uuid-block-0", "thinking", "First paragraph.\n\nSecond paragraph.\n\n"),
-    ...streamedBlock(1, "thinking", ["Last paragraph.\n\n"]),
-    blockSnapshot("uuid-block-1", "thinking", "Last paragraph.\n\n"),
-    streamFrame({ type: "message_stop" }),
+    MESSAGE_START,
+    ...streamedBlock({
+      index: 0,
+      kind: "thinking",
+      deltas: ["First paragraph.\n\n", "Second paragraph.\n\n"],
+    }),
+    blockSnapshot({
+      uuid: "uuid-block-0",
+      kind: "thinking",
+      text: "First paragraph.\n\nSecond paragraph.\n\n",
+    }),
+    blockStop(0),
+    ...streamedBlock({ index: 1, kind: "thinking", deltas: ["Last paragraph.\n\n"] }),
+    blockSnapshot({ uuid: "uuid-block-1", kind: "thinking", text: "Last paragraph.\n\n" }),
+    blockStop(1),
+    MESSAGE_STOP,
   ]);
 
-  expect(emittedChunks(items, "reasoning")).toEqual([
+  expect(emittedChunks({ items, type: "reasoning" })).toEqual([
     "First paragraph.\n\n",
     "Second paragraph.\n\n",
     "Last paragraph.\n\n",
@@ -2159,15 +2183,17 @@ test("shows each thinking block of a multi-block message once", async () => {
 
 test("shows each text block of a multi-block message once", async () => {
   const items = await runScriptedTurn([
-    streamFrame({ type: "message_start", message: { id: "msg-multi", role: "assistant" } }),
-    ...streamedBlock(0, "text", ["Checking ", "the tests."]),
-    blockSnapshot("uuid-block-0", "text", "Checking the tests."),
-    ...streamedBlock(1, "text", [" All green."]),
-    blockSnapshot("uuid-block-1", "text", " All green."),
-    streamFrame({ type: "message_stop" }),
+    MESSAGE_START,
+    ...streamedBlock({ index: 0, kind: "text", deltas: ["Checking ", "the tests."] }),
+    blockSnapshot({ uuid: "uuid-block-0", kind: "text", text: "Checking the tests." }),
+    blockStop(0),
+    ...streamedBlock({ index: 1, kind: "text", deltas: [" All green."] }),
+    blockSnapshot({ uuid: "uuid-block-1", kind: "text", text: " All green." }),
+    blockStop(1),
+    MESSAGE_STOP,
   ]);
 
-  expect(emittedChunks(items, "assistant_message")).toEqual([
+  expect(emittedChunks({ items, type: "assistant_message" })).toEqual([
     "Checking ",
     "the tests.",
     " All green.",
@@ -2176,77 +2202,72 @@ test("shows each text block of a multi-block message once", async () => {
 
 test("fills in text a block snapshot has beyond what streamed", async () => {
   const items = await runScriptedTurn([
-    streamFrame({ type: "message_start", message: { id: "msg-multi", role: "assistant" } }),
-    ...streamedBlock(0, "thinking", ["Partial"]),
-    blockSnapshot("uuid-block-0", "thinking", "Partial thought."),
-    ...streamedBlock(1, "thinking", ["Next."]),
-    blockSnapshot("uuid-block-1", "thinking", "Next."),
-    streamFrame({ type: "message_stop" }),
+    MESSAGE_START,
+    ...streamedBlock({ index: 0, kind: "thinking", deltas: ["Partial"] }),
+    blockSnapshot({ uuid: "uuid-block-0", kind: "thinking", text: "Partial thought." }),
+    blockStop(0),
+    ...streamedBlock({ index: 1, kind: "thinking", deltas: ["Next."] }),
+    blockSnapshot({ uuid: "uuid-block-1", kind: "thinking", text: "Next." }),
+    blockStop(1),
+    MESSAGE_STOP,
   ]);
 
-  expect(emittedChunks(items, "reasoning")).toEqual(["Partial", " thought.", "Next."]);
+  expect(emittedChunks({ items, type: "reasoning" })).toEqual(["Partial", " thought.", "Next."]);
 });
 
 test("keeps identical blocks that arrive only as snapshots", async () => {
   const items = await runScriptedTurn([
-    blockSnapshot("uuid-block-0", "text", "Same line."),
-    blockSnapshot("uuid-block-1", "text", "Same line."),
+    blockSnapshot({ uuid: "uuid-block-0", kind: "text", text: "Same line." }),
+    blockSnapshot({ uuid: "uuid-block-1", kind: "text", text: "Same line." }),
   ]);
 
-  expect(emittedChunks(items, "assistant_message")).toEqual(["Same line.", "Same line."]);
+  expect(emittedChunks({ items, type: "assistant_message" })).toEqual(["Same line.", "Same line."]);
 });
 
 test("ignores a redelivered block snapshot", async () => {
   const items = await runScriptedTurn([
-    blockSnapshot("uuid-block-0", "text", "Once."),
-    blockSnapshot("uuid-block-0", "text", "Once."),
+    blockSnapshot({ uuid: "uuid-block-0", kind: "text", text: "Once." }),
+    blockSnapshot({ uuid: "uuid-block-0", kind: "text", text: "Once." }),
   ]);
 
-  expect(emittedChunks(items, "assistant_message")).toEqual(["Once."]);
+  expect(emittedChunks({ items, type: "assistant_message" })).toEqual(["Once."]);
 });
 
+// Older fixtures send deltas without an index. This also covers a snapshot arriving after its
+// block's stop, the reverse of the documented order.
 test("continues the open block with deltas that carry no index", async () => {
   const items = await runScriptedTurn([
-    streamFrame({ type: "message_start", message: { id: "msg-multi", role: "assistant" } }),
-    streamFrame({
-      type: "content_block_start",
-      index: 0,
-      content_block: { type: "text", text: "" },
-    }),
-    streamFrame({
-      type: "content_block_delta",
-      index: 0,
-      delta: { type: "text_delta", text: "A" },
-    }),
+    MESSAGE_START,
+    ...streamedBlock({ index: 0, kind: "text", deltas: ["A"] }),
     streamFrame({ type: "content_block_delta", delta: { type: "text_delta", text: "B" } }),
-    streamFrame({ type: "content_block_stop", index: 0 }),
-    blockSnapshot("uuid-block-0", "text", "AB"),
+    blockStop(0),
+    blockSnapshot({ uuid: "uuid-block-0", kind: "text", text: "AB" }),
     streamFrame({ type: "content_block_delta", delta: { type: "text_delta", text: "C" } }),
-    streamFrame({ type: "content_block_stop", index: 1 }),
-    blockSnapshot("uuid-block-1", "text", "C"),
-    streamFrame({ type: "message_stop" }),
+    blockStop(1),
+    blockSnapshot({ uuid: "uuid-block-1", kind: "text", text: "C" }),
+    MESSAGE_STOP,
   ]);
 
-  expect(emittedChunks(items, "assistant_message")).toEqual(["A", "B", "C"]);
+  expect(emittedChunks({ items, type: "assistant_message" })).toEqual(["A", "B", "C"]);
 });
 
 // With thinking display "omitted", a thinking block streams an empty delta and a signature, and
 // the SDK sends no snapshot for it because it only snapshots non-empty blocks.
 test("does not hold a snapshot slot for an empty thinking block", async () => {
   const items = await runScriptedTurn([
-    streamFrame({ type: "message_start", message: { id: "msg-multi", role: "assistant" } }),
-    ...streamedBlock(0, "thinking", [""]).slice(0, -1),
+    MESSAGE_START,
+    ...streamedBlock({ index: 0, kind: "thinking", deltas: [""] }),
     streamFrame({
       type: "content_block_delta",
       index: 0,
       delta: { type: "signature_delta", signature: "sig" },
     }),
-    streamFrame({ type: "content_block_stop", index: 0 }),
-    ...streamedBlock(1, "thinking", ["Visible."]).slice(0, -1),
-    blockSnapshot("uuid-block-1", "thinking", "Visible."),
-    streamFrame({ type: "content_block_stop", index: 1 }),
-    streamFrame({ type: "message_stop" }),
+    blockStop(0),
+    ...streamedBlock({ index: 1, kind: "thinking", deltas: ["Visible."] }),
+    blockSnapshot({ uuid: "uuid-block-1", kind: "thinking", text: "Visible." }),
+    blockStop(1),
+    MESSAGE_STOP,
   ]);
 
-  expect(emittedChunks(items, "reasoning")).toEqual(["Visible."]);
+  expect(emittedChunks({ items, type: "reasoning" })).toEqual(["Visible."]);
 });

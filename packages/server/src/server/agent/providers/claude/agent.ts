@@ -1257,7 +1257,7 @@ class TimelineAssembler {
       state.appliedSnapshotUuids.add(snapshotUuid);
     }
     const fragments = this.extractFragments(message.message?.content);
-    return this.applyBlockSnapshots(state, fragments);
+    return this.applyBlockSnapshots({ state, fragments });
   }
 
   private consumeStreamEvent(
@@ -1349,19 +1349,20 @@ class TimelineAssembler {
     }
     const state = this.ensureMessageState(messageId, runId);
     for (const fragment of fragments) {
-      const key = this.resolveStreamBlockKey(state, blockIndex, fragment.kind);
+      const key = this.resolveStreamBlockKey({ state, blockIndex, kind: fragment.kind });
       state.openStreamBlockKey = key;
-      const block = state.blocks.get(key) ?? this.addBlock(state, key, fragment.kind);
+      const block = state.blocks.get(key) ?? this.addBlock({ state, key, kind: fragment.kind });
       block.text += fragment.text;
     }
     return this.emitNewContent(state);
   }
 
-  private resolveStreamBlockKey(
-    state: TimelineMessageState,
-    blockIndex: unknown,
-    kind: TimelineFragment["kind"],
-  ): string {
+  private resolveStreamBlockKey(input: {
+    state: TimelineMessageState;
+    blockIndex: unknown;
+    kind: TimelineFragment["kind"];
+  }): string {
+    const { state, blockIndex, kind } = input;
     if (typeof blockIndex === "number") {
       return `stream:${blockIndex}`;
     }
@@ -1372,10 +1373,11 @@ class TimelineAssembler {
     return `stream:unindexed:${++state.syntheticBlockCount}`;
   }
 
-  private applyBlockSnapshots(
-    state: TimelineMessageState,
-    fragments: TimelineFragment[],
-  ): AgentTimelineItem[] {
+  private applyBlockSnapshots(input: {
+    state: TimelineMessageState;
+    fragments: TimelineFragment[];
+  }): AgentTimelineItem[] {
+    const { state, fragments } = input;
     for (const fragment of fragments) {
       // Snapshots arrive in content order, so each belongs to the earliest block of its kind
       // that has not had one yet.
@@ -1384,7 +1386,7 @@ class TimelineAssembler {
       );
       if (!match) {
         const key = `snapshot:${++state.syntheticBlockCount}`;
-        const snapshotOnly = this.addBlock(state, key, fragment.kind);
+        const snapshotOnly = this.addBlock({ state, key, kind: fragment.kind });
         snapshotOnly.text = fragment.text;
         snapshotOnly.snapshotApplied = true;
         continue;
@@ -1403,11 +1405,12 @@ class TimelineAssembler {
     return this.emitNewContent(state);
   }
 
-  private addBlock(
-    state: TimelineMessageState,
-    key: string,
-    kind: TimelineFragment["kind"],
-  ): TimelineBlockState {
+  private addBlock(input: {
+    state: TimelineMessageState;
+    key: string;
+    kind: TimelineFragment["kind"];
+  }): TimelineBlockState {
+    const { state, key, kind } = input;
     const block: TimelineBlockState = { kind, text: "", emittedLength: 0, snapshotApplied: false };
     state.blocks.set(key, block);
     return block;
