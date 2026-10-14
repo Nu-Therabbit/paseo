@@ -1234,6 +1234,11 @@ class TimelineAssembler {
     return [];
   }
 
+  finishRun(runId: string): AgentTimelineItem[] {
+    const messageId = this.activeMessageByRun.get(runId);
+    return messageId ? this.finalizeMessage(messageId, runId) : [];
+  }
+
   private consumeAssistantMessage(
     message: SDKMessage & { type: "assistant" },
     runId: string | null,
@@ -5252,6 +5257,11 @@ class ClaudeAgentSession implements AgentSession {
   private notifySubscribers(event: AgentStreamEvent): void {
     const turnId =
       getAgentStreamEventTurnId(event) ?? this.activeForegroundTurnId ?? this.autonomousTurn?.id;
+    if (turnId && this.isTerminalTurnEvent(event)) {
+      for (const item of this.timelineAssembler.finishRun(turnId)) {
+        this.notifySubscribers({ type: "timeline", provider: "claude", item });
+      }
+    }
     const tagged = turnId ? { ...event, turnId } : event;
     this.logger.trace(
       {

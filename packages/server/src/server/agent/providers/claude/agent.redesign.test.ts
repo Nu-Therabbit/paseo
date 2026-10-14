@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import type { Logger } from "pino";
-import type { Query } from "@anthropic-ai/claude-agent-sdk";
+import type { Query, SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 
 import { createTestLogger } from "../../../../test-utils/test-logger.js";
 import { asInternals } from "../../../test-utils/class-mocks.js";
@@ -2097,15 +2097,20 @@ function blockSnapshot(input: { uuid: string; kind: "thinking" | "text"; text: s
   };
 }
 
-async function runScriptedTurn(frames: Record<string, unknown>[]): Promise<AgentTimelineItem[]> {
+async function runScriptedTurn(
+  frames: Array<Record<string, unknown> | Error | "interrupt">,
+): Promise<AgentTimelineItem[]> {
+  let session: Awaited<ReturnType<ClaudeAgentClient["createSession"]>>;
   // An injected SDK transport exercises the public session, without module mocks.
   const client = new ClaudeAgentClient({
     logger: createTestLogger(),
     resolveBinary: async () => "/test/claude/bin",
     queryFactory: ({ prompt }) => {
       const readPromptUuid = createPromptUuidReader(prompt as AsyncIterable<unknown>);
-      const iterator = (async function* () {
-        yield { ...claudeTurnInit(), session_id: MULTI_BLOCK_SESSION_ID };
+      const iterator = (async function* (): AsyncGenerator<SDKMessage, void> {
+        // These fixtures deliberately include legacy/incomplete wire frames. Their cast stays
+        // at the input boundary; the injected transport itself implements the full SDK interface.
+        yield { ...claudeTurnInit(), session_id: MULTI_BLOCK_SESSION_ID } as SDKMessage;
         yield {
           type: "user",
           message: { role: "user", content: "multi-block prompt" },
@@ -2113,20 +2118,54 @@ async function runScriptedTurn(frames: Record<string, unknown>[]): Promise<Agent
           uuid: (await readPromptUuid()) ?? "missing-prompt-uuid",
           session_id: MULTI_BLOCK_SESSION_ID,
         };
-        yield* frames;
-        yield successResult();
+        for (const frame of frames) {
+          if (frame instanceof Error) throw frame;
+          if (frame === "interrupt") {
+            await session.interrupt();
+            return;
+          }
+          yield frame as SDKMessage;
+        }
+        yield successResult() as SDKMessage;
       })();
-      return Object.assign(iterator, {
+      const unsupported = async (): Promise<never> => {
+        throw new Error("SDK operation not supported by scripted transport");
+      };
+      const transport: Query = Object.assign(iterator, {
         interrupt: async () => undefined,
         close: () => undefined,
         setPermissionMode: async () => undefined,
         setModel: async () => undefined,
-        supportedModels: async () => [{ value: "opus", displayName: "Opus" }],
+        supportedModels: async () => [
+          { value: "opus", displayName: "Opus", description: "Test model" },
+        ],
         supportedCommands: async () => [],
-      }) as unknown as Query;
+        setMcpPermissionModeOverride: unsupported,
+        setMaxThinkingTokens: unsupported,
+        applyFlagSettings: unsupported,
+        initializationResult: unsupported,
+        reinitialize: unsupported,
+        supportedAgents: unsupported,
+        mcpServerStatus: unsupported,
+        getContextUsage: unsupported,
+        usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET: unsupported,
+        readFile: unsupported,
+        reloadPlugins: unsupported,
+        reloadSkills: unsupported,
+        accountInfo: unsupported,
+        rewindFiles: unsupported,
+        seedReadState: unsupported,
+        reconnectMcpServer: unsupported,
+        toggleMcpServer: unsupported,
+        setMcpServers: unsupported,
+        streamInput: unsupported,
+        stopTask: unsupported,
+        backgroundTasks: unsupported,
+      });
+      return transport;
     },
   });
-  const session = await client.createSession({ provider: "claude", cwd: process.cwd() });
+  session = await client.createSession({ provider: "claude", cwd: process.cwd() });
   try {
     const events = await collectUntilTerminal(streamSession(session, "multi-block prompt"));
     return events.flatMap((event) => (event.type === "timeline" ? [event.item] : []));
@@ -2344,3 +2383,18 @@ test("retains thinking at message stop when no completed block snapshot arrives"
   ]);
   expect(emittedChunks({ items, type: "reasoning" }).join("")).toBe("Partial thought.");
 });
+
+test.each([
+  ["fails", new Error("Provider disconnected")],
+  ["is interrupted", "interrupt" as const],
+])(
+  "retains unfinished thinking when the turn %s without a message stop",
+  async (_name, terminal) => {
+    const items = await runScriptedTurn([
+      MESSAGE_START,
+      ...streamedBlock({ index: 0, kind: "thinking", deltas: ["Partial", " thought."] }),
+      terminal,
+    ]);
+    expect(emittedChunks({ items, type: "reasoning" })).toEqual(["Partial thought."]);
+  },
+);

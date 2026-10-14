@@ -37,7 +37,10 @@ function writePlans(cwd: string): void {
   );
 }
 
-test("the comparison written before AskUserQuestion reaches the timeline as assistant text", async () => {
+async function runPlanComparison(): Promise<{
+  items: AgentTimelineItem[];
+  narration: string[];
+}> {
   const cwd = mkdtempSync(path.join(tmpdir(), "claude-progress-updates-"));
   writePlans(cwd);
   const narration: string[] = [];
@@ -87,6 +90,11 @@ test("the comparison written before AskUserQuestion reaches the timeline as assi
     void session.startTurn(PROMPT).catch(reject);
   });
 
+  return { items, narration };
+}
+
+test("the comparison written before AskUserQuestion reaches the timeline as assistant text", async () => {
+  const { items, narration } = await runPlanComparison();
   const lastReadIndex = items.findLastIndex(
     (item) => item.type === "tool_call" && item.name !== "AskUserQuestion",
   );
