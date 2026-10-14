@@ -1188,6 +1188,7 @@ function buildClaudePlanPermissionActions(
 interface TimelineFragment {
   kind: "assistant" | "reasoning";
   text: string;
+  narration: boolean;
 }
 
 // While streaming, the SDK emits one assistant message per completed non-empty content block,
@@ -1256,7 +1257,16 @@ class TimelineAssembler {
       }
       state.appliedSnapshotUuids.add(snapshotUuid);
     }
-    const fragments = this.extractFragments(message.message?.content);
+    const marker = toObjectRecord(message)?.narration_block_indexes;
+    const narrationIndexes = new Set<number>(
+      Array.isArray(marker)
+        ? marker.filter((index): index is number => Number.isInteger(index) && index >= 0)
+        : [],
+    );
+    const fragments = this.extractFragments({
+      content: message.message?.content,
+      narrationIndexes,
+    });
     return this.applyBlockSnapshots({ state, fragments });
   }
 
@@ -1335,7 +1345,7 @@ class TimelineAssembler {
     messageIdHint: string | null;
   }): AgentTimelineItem[] {
     const { content, blockIndex, runId, messageIdHint } = input;
-    const fragments = this.extractFragments(content);
+    const fragments = this.extractFragments({ content });
     if (fragments.length === 0) {
       return [];
     }
@@ -1354,7 +1364,7 @@ class TimelineAssembler {
       const block = state.blocks.get(key) ?? this.addBlock({ state, key, kind: fragment.kind });
       block.text += fragment.text;
     }
-    return this.emitNewContent(state);
+    return this.emitNewContent({ state });
   }
 
   private resolveStreamBlockKey(input: {
@@ -1387,22 +1397,27 @@ class TimelineAssembler {
       if (!match) {
         const key = `snapshot:${++state.syntheticBlockCount}`;
         const snapshotOnly = this.addBlock({ state, key, kind: fragment.kind });
+        snapshotOnly.kind = fragment.narration ? "assistant" : fragment.kind;
         snapshotOnly.text = fragment.text;
         snapshotOnly.snapshotApplied = true;
         continue;
       }
       const [key, block] = match;
       block.snapshotApplied = true;
+      if (fragment.narration) {
+        block.kind = "assistant";
+      }
       // A snapshot completes its block, so later deltas without an index start a new one.
       if (state.openStreamBlockKey === key) {
         state.openStreamBlockKey = null;
       }
-      // Emitted text cannot be retracted, so a snapshot that rewrites streamed text is ignored.
-      if (fragment.text.startsWith(block.text)) {
+      // Buffered thinking has not been emitted, so its completed text is authoritative.
+      // Plain text has streamed already and can only be extended.
+      if (block.emittedLength === 0 || fragment.text.startsWith(block.text)) {
         block.text = fragment.text;
       }
     }
-    return this.emitNewContent(state);
+    return this.emitNewContent({ state });
   }
 
   private addBlock(input: {
@@ -1422,7 +1437,7 @@ class TimelineAssembler {
       return [];
     }
     state.stopped = true;
-    const items = this.emitNewContent(state);
+    const items = this.emitNewContent({ state, finalizing: true });
     if (runId && this.activeMessageByRun.get(runId) === messageId) {
       this.activeMessageByRun.delete(runId);
     }
@@ -1431,9 +1446,18 @@ class TimelineAssembler {
     return items;
   }
 
-  private emitNewContent(state: TimelineMessageState): AgentTimelineItem[] {
+  private emitNewContent(input: {
+    state: TimelineMessageState;
+    finalizing?: boolean;
+  }): AgentTimelineItem[] {
+    const { state, finalizing = false } = input;
     const items: AgentTimelineItem[] = [];
     for (const block of state.blocks.values()) {
+      // Narration is identified only by the completed snapshot. Hold thinking until then,
+      // so a progress update never reaches clients as reasoning. Plain text still streams.
+      if (block.kind === "reasoning" && !block.snapshotApplied && !finalizing) {
+        continue;
+      }
       const nextText = block.text.slice(block.emittedLength);
       if (nextText.length === 0) {
         continue;
@@ -1500,16 +1524,20 @@ class TimelineAssembler {
     return synthetic;
   }
 
-  private extractFragments(content: unknown): TimelineFragment[] {
+  private extractFragments(input: {
+    content: unknown;
+    narrationIndexes?: ReadonlySet<number>;
+  }): TimelineFragment[] {
+    const { content, narrationIndexes = new Set<number>() } = input;
     if (typeof content === "string") {
       if (content.length === 0) {
         return [];
       }
-      return [{ kind: "assistant", text: content }];
+      return [{ kind: "assistant", text: content, narration: false }];
     }
     const blocks = Array.isArray(content) ? content : [content];
     const fragments: TimelineFragment[] = [];
-    for (const rawBlock of blocks) {
+    for (const [index, rawBlock] of blocks.entries()) {
       if (!isClaudeContentChunk(rawBlock)) {
         continue;
       }
@@ -1518,14 +1546,18 @@ class TimelineAssembler {
         typeof rawBlock.text === "string" &&
         rawBlock.text.length > 0
       ) {
-        fragments.push({ kind: "assistant", text: rawBlock.text });
+        fragments.push({ kind: "assistant", text: rawBlock.text, narration: false });
       }
       if (
         (rawBlock.type === "thinking" || rawBlock.type === "thinking_delta") &&
         typeof rawBlock.thinking === "string" &&
         rawBlock.thinking.length > 0
       ) {
-        fragments.push({ kind: "reasoning", text: rawBlock.thinking });
+        fragments.push({
+          kind: "reasoning",
+          text: rawBlock.thinking,
+          narration: narrationIndexes.has(index),
+        });
       }
     }
     return fragments;

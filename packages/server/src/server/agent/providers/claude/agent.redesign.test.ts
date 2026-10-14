@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import type { Logger } from "pino";
+import type { Query } from "@anthropic-ai/claude-agent-sdk";
 
 import { createTestLogger } from "../../../../test-utils/test-logger.js";
 import { asInternals } from "../../../test-utils/class-mocks.js";
@@ -2097,46 +2098,41 @@ function blockSnapshot(input: { uuid: string; kind: "thinking" | "text"; text: s
 }
 
 async function runScriptedTurn(frames: Record<string, unknown>[]): Promise<AgentTimelineItem[]> {
-  sdkQueryFactory.mockImplementation(({ prompt }: { prompt: AsyncIterable<unknown> }) => {
-    const readPromptUuid = createPromptUuidReader(prompt);
-    let step = 0;
-    return createBaseQueryMock(
-      vi.fn(async () => {
-        const index = step++;
-        if (index === 0) {
-          return {
-            done: false,
-            value: { ...claudeTurnInit(), session_id: MULTI_BLOCK_SESSION_ID },
-          };
-        }
-        if (index === 1) {
-          return {
-            done: false,
-            value: {
-              type: "user",
-              message: { role: "user", content: "multi-block prompt" },
-              parent_tool_use_id: null,
-              uuid: (await readPromptUuid()) ?? "missing-prompt-uuid",
-              session_id: MULTI_BLOCK_SESSION_ID,
-            },
-          };
-        }
-        const frame = frames[index - 2];
-        if (frame) {
-          return { done: false, value: frame };
-        }
-        if (index === frames.length + 2) {
-          return { done: false, value: successResult() };
-        }
-        return { done: true, value: undefined };
-      }),
-    );
+  // An injected SDK transport exercises the public session, without module mocks.
+  const client = new ClaudeAgentClient({
+    logger: createTestLogger(),
+    resolveBinary: async () => "/test/claude/bin",
+    queryFactory: ({ prompt }) => {
+      const readPromptUuid = createPromptUuidReader(prompt as AsyncIterable<unknown>);
+      const iterator = (async function* () {
+        yield { ...claudeTurnInit(), session_id: MULTI_BLOCK_SESSION_ID };
+        yield {
+          type: "user",
+          message: { role: "user", content: "multi-block prompt" },
+          parent_tool_use_id: null,
+          uuid: (await readPromptUuid()) ?? "missing-prompt-uuid",
+          session_id: MULTI_BLOCK_SESSION_ID,
+        };
+        yield* frames;
+        yield successResult();
+      })();
+      return Object.assign(iterator, {
+        interrupt: async () => undefined,
+        close: () => undefined,
+        setPermissionMode: async () => undefined,
+        setModel: async () => undefined,
+        supportedModels: async () => [{ value: "opus", displayName: "Opus" }],
+        supportedCommands: async () => [],
+      }) as unknown as Query;
+    },
   });
-
-  const session = await createSession();
-  const events = await collectUntilTerminal(streamSession(session, "multi-block prompt"));
-  await session.close();
-  return events.flatMap((event) => (event.type === "timeline" ? [event.item] : []));
+  const session = await client.createSession({ provider: "claude", cwd: process.cwd() });
+  try {
+    const events = await collectUntilTerminal(streamSession(session, "multi-block prompt"));
+    return events.flatMap((event) => (event.type === "timeline" ? [event.item] : []));
+  } finally {
+    await session.close();
+  }
 }
 
 // Each chunk as emitted, so a test sees duplicates and lost chunks, not just the final text.
@@ -2175,8 +2171,7 @@ test("shows each thinking block of a multi-block message once", async () => {
   ]);
 
   expect(emittedChunks({ items, type: "reasoning" })).toEqual([
-    "First paragraph.\n\n",
-    "Second paragraph.\n\n",
+    "First paragraph.\n\nSecond paragraph.\n\n",
     "Last paragraph.\n\n",
   ]);
 });
@@ -2212,7 +2207,7 @@ test("fills in text a block snapshot has beyond what streamed", async () => {
     MESSAGE_STOP,
   ]);
 
-  expect(emittedChunks({ items, type: "reasoning" })).toEqual(["Partial", " thought.", "Next."]);
+  expect(emittedChunks({ items, type: "reasoning" })).toEqual(["Partial thought.", "Next."]);
 });
 
 test("keeps identical blocks that arrive only as snapshots", async () => {
@@ -2270,4 +2265,82 @@ test("does not hold a snapshot slot for an empty thinking block", async () => {
   ]);
 
   expect(emittedChunks({ items, type: "reasoning" })).toEqual(["Visible."]);
+});
+
+test("shows a streamed narration block as assistant text before its question", async () => {
+  const comparison = "Plan B is fastest. Plan C costs least.";
+  const items = await runScriptedTurn([
+    MESSAGE_START,
+    ...streamedBlock({ index: 0, kind: "thinking", deltas: ["Compare cost", " and time."] }),
+    blockSnapshot({ uuid: "reason", kind: "thinking", text: "Compare cost and time." }),
+    blockStop(0),
+    ...streamedBlock({ index: 1, kind: "thinking", deltas: [comparison] }),
+    {
+      ...blockSnapshot({ uuid: "narration", kind: "thinking", text: comparison }),
+      narration_block_indexes: [0],
+    },
+    blockStop(1),
+    {
+      type: "assistant",
+      parent_tool_use_id: null,
+      message: {
+        id: "msg-multi",
+        content: [{ type: "tool_use", id: "ask-plan", name: "AskUserQuestion", input: {} }],
+      },
+    },
+    MESSAGE_STOP,
+  ]);
+
+  expect(emittedChunks({ items, type: "reasoning" }).join("")).toBe("Compare cost and time.");
+  expect(emittedChunks({ items, type: "assistant_message" })).toEqual([comparison]);
+  const comparisonIndex = items.findIndex((item) => item.type === "assistant_message");
+  const questionIndex = items.findIndex((item) => item.type === "tool_call");
+  expect(questionIndex).toBeGreaterThan(comparisonIndex);
+});
+
+test("classifies only the marked thinking block of a snapshot-only message", async () => {
+  const items = await runScriptedTurn([
+    {
+      type: "assistant",
+      uuid: "snapshot-only",
+      parent_tool_use_id: null,
+      narration_block_indexes: [2],
+      message: {
+        id: "msg-multi",
+        content: [
+          { type: "text", text: "Reading plans." },
+          { type: "thinking", thinking: "Compare the options." },
+          { type: "thinking", thinking: "Plan B is fastest." },
+        ],
+      },
+    },
+  ]);
+  expect(emittedChunks({ items, type: "assistant_message" })).toEqual([
+    "Reading plans.",
+    "Plan B is fastest.",
+  ]);
+  expect(emittedChunks({ items, type: "reasoning" })).toEqual(["Compare the options."]);
+});
+
+test("ignores malformed narration markers and retains unmarked reasoning", async () => {
+  for (const marker of [undefined, null, "0", ["0"], [-1], [1.5], [3]]) {
+    const items = await runScriptedTurn([
+      {
+        ...blockSnapshot({ uuid: "unmarked", kind: "thinking", text: "A thought." }),
+        narration_block_indexes: marker,
+      },
+    ]);
+    expect(emittedChunks({ items, type: "reasoning" })).toEqual(["A thought."]);
+    expect(emittedChunks({ items, type: "assistant_message" })).toEqual([]);
+  }
+});
+
+test("retains thinking at message stop when no completed block snapshot arrives", async () => {
+  const items = await runScriptedTurn([
+    MESSAGE_START,
+    ...streamedBlock({ index: 0, kind: "thinking", deltas: ["Partial", " thought."] }),
+    blockStop(0),
+    MESSAGE_STOP,
+  ]);
+  expect(emittedChunks({ items, type: "reasoning" }).join("")).toBe("Partial thought.");
 });
