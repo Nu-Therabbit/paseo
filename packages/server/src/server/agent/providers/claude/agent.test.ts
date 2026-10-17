@@ -2847,7 +2847,7 @@ describe("ClaudeAgentSession context window usage", () => {
             iterations: [],
           },
           modelUsage: {
-            "glm-5.2": { contextWindow: 1_000_000 },
+            "claude-sonnet-4-6": { contextWindow: 1_000_000 },
           },
           uuid: "result-2",
         }),
