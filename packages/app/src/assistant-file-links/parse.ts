@@ -63,7 +63,16 @@ function normalizePathToken(value: string): string | null {
     return null;
   }
 
-  return trimmed.replace(/\\/g, "/");
+  return stripSlashBeforeDrive(trimmed.replace(/\\/g, "/"));
+}
+
+/**
+ * Agents write Windows paths as `/C:/repo/file.ts` (the file-URL path shape)
+ * in plain hrefs too. Left in place, the leading slash makes the path read as
+ * POSIX-rooted, so it resolves against `/` instead of the drive (#3290).
+ */
+function stripSlashBeforeDrive(value: string): string {
+  return /^\/[A-Za-z]:\//.test(value) ? value.slice(1) : value;
 }
 
 function parseLineFragment(value: string): Pick<InlinePathTarget, "lineStart" | "lineEnd"> | null {
@@ -678,11 +687,7 @@ function normalizeFileUrlPath(pathname: string): string | null {
     return null;
   }
 
-  if (/^\/[A-Za-z]:\//.test(decoded)) {
-    return decoded.slice(1);
-  }
-
-  return decoded;
+  return stripSlashBeforeDrive(decoded);
 }
 
 function normalizePathInput(value: string | undefined): string | null {

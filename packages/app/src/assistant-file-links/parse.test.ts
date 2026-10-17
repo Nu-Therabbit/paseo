@@ -323,6 +323,45 @@ describe("parseAssistantFileLink", () => {
     });
   });
 
+  it("drops the leading slash from slash-prefixed Windows drive hrefs", () => {
+    expect(
+      parseAssistantFileLink("/F:/work/sample-project/output/welcome.mp4", {
+        workspaceRoot: "F:/work/sample-project",
+        decodeHref: true,
+        explicitLink: true,
+      }),
+    ).toEqual({
+      raw: "/F:/work/sample-project/output/welcome.mp4",
+      path: "F:/work/sample-project/output/welcome.mp4",
+      lineStart: undefined,
+      lineEnd: undefined,
+    });
+  });
+
+  it("drops the leading slash from slash-prefixed Windows drive hrefs with line markers", () => {
+    expect(
+      parseAssistantFileLink("/C:/repo/my%20dir/app.tsx#L8", {
+        workspaceRoot: "C:/repo",
+        decodeHref: true,
+      }),
+    ).toEqual({
+      raw: "/C:/repo/my%20dir/app.tsx#L8",
+      path: "C:/repo/my dir/app.tsx",
+      lineStart: 8,
+      lineEnd: undefined,
+    });
+    expect(
+      parseAssistantFileLink("/C:/repo/src/app.tsx:12-20", {
+        workspaceRoot: "C:/repo",
+      }),
+    ).toEqual({
+      raw: "/C:/repo/src/app.tsx:12-20",
+      path: "C:/repo/src/app.tsx",
+      lineStart: 12,
+      lineEnd: 20,
+    });
+  });
+
   it("allows file URLs even when they are outside the workspace root", () => {
     expect(
       parseAssistantFileLink("file:///tmp/outside.txt", {
