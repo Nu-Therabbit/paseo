@@ -18,6 +18,7 @@ const CAPABILITIES = [
   "prompt.command",
   "prompt.image",
   "prompt.steer",
+  "permission",
   "session.configure",
   "session.list",
   "session.persistence",
@@ -97,7 +98,9 @@ function connect(catalog: Catalog, capabilities: readonly string[]): ProviderCon
         await session.prompt(input.prompt);
         return;
       case "session.permission":
-        throw new Error("Cursor (SDK) does not request permissions");
+        // Permission inputs carry no request id to complete.
+        await session.respond(input.permissionId, input.response);
+        return;
       case "session.configure":
         session.configure(input.changes);
         break;

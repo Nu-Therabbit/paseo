@@ -15,6 +15,7 @@ import type {
   ProviderError,
   ProviderEvent,
   ProviderInput,
+  ProviderPermissionResponse,
   ProviderPersistence,
   ProviderPrompt,
   ProviderSessionConfig,
@@ -40,6 +41,7 @@ import {
   expandCommand,
   presentCommands,
 } from "./commands.js";
+import { QuestionBridge } from "./questions.js";
 import { type CursorSdk, loadCursorSdk, localStore } from "./sdk.js";
 import { TurnTimeline } from "./turn.js";
 
@@ -95,9 +97,11 @@ export class CursorSession {
   private publishedCommands: string | undefined;
   private freshConversation = true;
   private closed = false;
+  private readonly questions: QuestionBridge;
 
   constructor(private readonly options: SessionOptions) {
     this.config = options.config;
+    this.questions = new QuestionBridge(options.id, options.emit);
   }
 
   async open(input: Extract<ProviderInput, { type: "session.open" }>): Promise<void> {
@@ -112,12 +116,13 @@ export class CursorSession {
     };
     if (!this.config.model) throw new Error("Cursor returned no models for this account");
 
-    const local = localOptions(sdk, this.config);
     const agentOptions = {
       model: this.selection(),
       mode: this.mode(),
       mcpServers: mcpServers(this.config),
-      local,
+      // Not persisted by the SDK, so resume passes it again.
+      disallowedTools: ["askQuestion"],
+      local: { ...localOptions(sdk, this.config), customTools: this.questions.tools() },
     };
     if (saved) {
       try {
@@ -161,6 +166,7 @@ export class CursorSession {
 
   async prompt(prompt: ProviderPrompt): Promise<void> {
     if (this.closed) throw new Error("Cursor session is closed");
+    if (prompt.clearPendingPermissions) this.questions.dismissAll();
     if (prompt.delivery === "steer") {
       await this.steer(prompt);
       return;
@@ -240,6 +246,10 @@ export class CursorSession {
     });
   }
 
+  async respond(permissionId: string, response: ProviderPermissionResponse): Promise<void> {
+    if (this.questions.respond(permissionId, response)) await this.interrupt();
+  }
+
   async interrupt(): Promise<void> {
     for (const { prompt } of this.queued.splice(0)) {
       this.promptFailed(prompt, { message: "Interrupted before this message was sent" });
@@ -247,6 +257,8 @@ export class CursorSession {
     const active = this.active;
     if (!active) return;
     active.canceled = true;
+    // A question tool still waiting would hold the run open past its cancel.
+    this.questions.dismissAll();
     if (active.run) {
       await active.run.cancel();
       return;
@@ -288,6 +300,7 @@ export class CursorSession {
     const active = this.active;
     if (active) {
       active.canceled = true;
+      this.questions.dismissAll();
       await active.run?.cancel().catch(() => undefined);
     }
     this.agent?.close();
@@ -327,6 +340,7 @@ export class CursorSession {
     });
     void this.runTurn(agent, active, message, settle).finally(() => {
       this.active = undefined;
+      this.questions.dismissAll();
       const next = this.queued.shift();
       if (next && !this.closed) this.startTurn(next);
       void this.refreshCommands().catch(() => undefined);

@@ -2,7 +2,7 @@ import type { AgentMessage, SDKToolUseMessage } from "@cursor/sdk";
 import type { ProviderTimelineItem } from "@getpaseo/plugin/server/provider";
 import { z } from "zod";
 import { withoutInstructions } from "./prompt.js";
-import { todoItems, toolDetail, toolError } from "./tools.js";
+import { todoItems, toolDetail, toolError, displayToolName } from "./tools.js";
 
 // `Agent.messages.list()` returns one entry per stored turn as a protobuf message. Its
 // JSON form flattens oneofs into keys: a turn is `{ agentConversationTurn: { userMessage, steps } }`
@@ -60,7 +60,7 @@ function toolItems(id: string, step: Record<string, unknown>): ProviderTimelineI
     type: "tool_call" as const,
     id,
     callId: id,
-    name: message.name,
+    name: displayToolName(message),
     detail: toolDetail(message),
   };
   const items: ProviderTimelineItem[] = [

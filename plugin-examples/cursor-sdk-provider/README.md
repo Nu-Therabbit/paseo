@@ -34,11 +34,17 @@ It needs Node 22.13 or later on the daemon host.
 | Steering                 | `run.steer()`; a message Cursor reverts fails the steer and Paseo falls back       |
 | Interrupt                | `run.cancel()`                                                                     |
 | Slash commands           | Commands and skills from Cursor's folders, expanded into the prompt when picked    |
+| Questions                | An `ask_question` custom tool in place of `askQuestion`, answered in Paseo's form  |
 | Host tools               | `config.mcpServers`, passed on every create, resume, and send                      |
 | System prompt            | Prepended to the first message; Cursor's `systemPrompt` replaces its harness       |
 
-Local SDK agents run tools without approval prompts, so the provider has no permission flow and
+Local SDK agents run tools without approval prompts, so the provider asks no tool permissions and
 marks Agent as the unattended mode. Use Plan mode, or the provider options below, to restrict it.
+
+Local SDK runs reject Cursor's built-in `askQuestion`, so the provider disallows it and gives the
+agent an `ask_question` tool instead. A call shows Paseo's question form and the run waits for the
+answers. Dismissing the form tells the agent no answer came; interrupting the turn or sending a new
+message dismisses any question still open.
 
 The SDK gives the model its skills as context but does not expand `/name` in message text, so the
 provider lists them itself. It reads `.cursor/commands` and `.claude/commands` (`<name>.md`) and the

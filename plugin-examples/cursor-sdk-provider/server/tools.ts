@@ -4,6 +4,7 @@ import type {
   ProviderToolCallDetail,
 } from "@getpaseo/plugin/server/provider";
 import { z } from "zod";
+import { QUESTION_TOOL, questionDetail } from "./questions.js";
 
 type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
 type TodoItem = Extract<ProviderTimelineItem, { type: "todo" }>["items"][number];
@@ -27,7 +28,13 @@ const planArgs = z.object({ plan: text });
 const todosArgs = z.object({
   todos: z.array(z.object({ content: text, status: text.optional(), id: text.optional() })),
 });
-const mcpArgs = z.object({ providerIdentifier: text.optional(), toolName: text.optional() });
+const mcpArgs = z.object({
+  providerIdentifier: text.optional(),
+  toolName: text.optional(),
+  args: z.unknown().optional(),
+});
+// The MCP server the SDK exposes `customTools` through.
+const CUSTOM_TOOLS_SERVER = "custom-user-tools";
 
 const shellResult = z.object({
   stdout: text.optional(),
@@ -131,12 +138,24 @@ const mappers: Record<string, Mapper> = {
     const parsed = parse(planArgs, args);
     return parsed && { type: "plan", text: parsed.plan };
   },
-  mcp(args) {
+  mcp(args, value) {
     const parsed = parse(mcpArgs, args);
+    if (parsed && isQuestionCall(parsed)) return questionDetail(parsed.args, value);
     const label = [parsed?.providerIdentifier, parsed?.toolName].filter(Boolean).join(" · ");
     return label ? { type: "plain_text", label, icon: "wrench" } : undefined;
   },
 };
+
+function isQuestionCall(args: z.infer<typeof mcpArgs>): boolean {
+  return args.providerIdentifier === CUSTOM_TOOLS_SERVER && args.toolName === QUESTION_TOOL;
+}
+
+// Custom tools arrive as generic `mcp` calls; name the question tool so the row reads as one.
+export function displayToolName(message: SDKToolUseMessage): string {
+  if (toolKey(message.name) !== "mcp") return message.name;
+  const parsed = parse(mcpArgs, message.args);
+  return parsed && isQuestionCall(parsed) ? QUESTION_TOOL : message.name;
+}
 
 export function toolDetail(message: SDKToolUseMessage): ProviderToolCallDetail {
   const value = resultValue(message.result);

@@ -1,6 +1,6 @@
 import type { RunResult, SDKMessage, SDKToolUseMessage, TokenUsage } from "@cursor/sdk";
 import type { ProviderEvent, ProviderUsage } from "@getpaseo/plugin/server/provider";
-import { todoItems, toolDetail, toolError } from "./tools.js";
+import { todoItems, toolDetail, toolError, displayToolName } from "./tools.js";
 
 interface Segment {
   id: string;
@@ -89,7 +89,7 @@ export class TurnTimeline {
       type: "tool_call" as const,
       id: `tool:${message.call_id}`,
       callId: message.call_id,
-      name: message.name,
+      name: displayToolName(message),
       detail: toolDetail(message),
     };
     this.emitItem(
