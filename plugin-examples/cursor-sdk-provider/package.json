@@ -1,0 +1,28 @@
+{
+  "name": "@getpaseo/plugin-example-cursor-sdk-provider",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Paseo provider plugin that runs Cursor agents through @cursor/sdk",
+  "files": [
+    "paseo-plugin.json",
+    "index.server.ts",
+    "server/",
+    "icon.svg",
+    "README.md"
+  ],
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "login": "node --input-type=module -e \"const { Cursor } = await import('@cursor/sdk'); const result = await Cursor.auth.login({ apiKeyName: 'Paseo' }); console.log('Signed in to Cursor as', result.email ?? '(unknown)');\"",
+    "login:status": "node --input-type=module -e \"const { Cursor } = await import('@cursor/sdk'); console.log(await Cursor.auth.status());\""
+  },
+  "dependencies": {
+    "@cursor/sdk": "1.0.38"
+  },
+  "devDependencies": {
+    "@getpaseo/plugin": "0.12.0-beta.2",
+    "@types/node": "^22.13.0",
+    "typescript": "^5.9.3",
+    "zod": "^4.4.3"
+  }
+}

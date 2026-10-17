@@ -1,0 +1,7 @@
+{
+  "id": "cursor-sdk-provider",
+  "name": "Cursor (SDK)",
+  "description": "Runs Cursor agents through @cursor/sdk instead of Cursor CLI over ACP",
+  "requirements": { "paseo": ">=0.12.0" },
+  "server": { "externals": ["@cursor/sdk"] }
+}

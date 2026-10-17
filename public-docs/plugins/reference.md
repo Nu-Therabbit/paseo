@@ -329,7 +329,10 @@ plugin directory, for example with `npm install` or a [`build`](#cli-reference) 
 `node_modules` in the installed plugin. Compilation fails when an external is missing or names a
 module Paseo provides (`@getpaseo/plugin`, `zod`, or a Node built-in). Externals apply to server
 code only; client bundles stay self-contained. An external runs on the daemon's Node version, so
-check the package's `engines` range.
+check the package's `engines` range. Load an external with a static `import` or `require()`; a
+dynamic `import()` of an external resolves from the daemon's installation and fails. See
+[`plugin-examples/cursor-sdk-provider`](https://github.com/getpaseo/paseo/tree/main/plugin-examples/cursor-sdk-provider)
+for a provider built on an external SDK.
 
 A dependency's declaration files may import types the package does not publish, such as its own
 development packages. Paseo ignores those unresolved type imports inside `node_modules`. Unresolved

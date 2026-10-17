@@ -89,8 +89,9 @@ describe("plugin SDK import boundaries", () => {
 
 describe("plugin example import boundaries", () => {
   const examples = path.resolve(sourceDirectory, "../../../plugin-examples");
-  const files = readdirSync(examples, { recursive: true }).filter((file) =>
-    /(?<!\.test)\.tsx?$/.test(file),
+  // An example with its own npm dependencies may have them installed in place.
+  const files = readdirSync(examples, { recursive: true }).filter(
+    (file) => /(?<!\.test)\.tsx?$/.test(file) && !file.split(path.sep).includes("node_modules"),
   );
   const owner = (file: string) => {
     const [, directory] = path.relative(examples, file).split(path.sep);
