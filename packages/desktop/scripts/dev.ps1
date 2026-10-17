@@ -2,7 +2,6 @@ $ErrorActionPreference = "Stop"
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $DesktopDir = (Resolve-Path "$ScriptDir\..").Path
-$AppDir = (Resolve-Path "$DesktopDir\..\app").Path
 $RootDir = (Resolve-Path "$DesktopDir\..\..").Path
 $env:PATH = "$RootDir\node_modules\.bin;$env:PATH"
 
@@ -110,10 +109,14 @@ Write-Host @"
 ======================================================
 "@
 
-# Launch Metro + Electron together, kill both on exit
+# Launch Metro + Electron together, kill both on exit.
+# Use paths relative to the desktop package: Windows PowerShell 5.1 drops the
+# quotes embedded in native arguments, so an absolute path with a space
+# ("E:\Dev\AI Tools\...") would split into separate commands.
+Set-Location $DesktopDir
 concurrently `
     --kill-others `
     --names "metro,electron" `
     --prefix-colors "magenta,cyan" `
-    "cd `"$AppDir`" && cross-env PASEO_WEB_PLATFORM=electron npx expo start --port $($env:EXPO_PORT)" `
-    "npx wait-on tcp:$($env:EXPO_PORT) && npx electron `"$DesktopDir`""
+    "cd ..\app && cross-env PASEO_WEB_PLATFORM=electron npx expo start --port $($env:EXPO_PORT)" `
+    "npx wait-on tcp:$($env:EXPO_PORT) && npx electron ."
