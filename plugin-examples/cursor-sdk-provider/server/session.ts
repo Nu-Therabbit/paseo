@@ -34,6 +34,12 @@ import {
 import { providerError } from "./errors.js";
 import { historyItems } from "./history.js";
 import { promptMessage } from "./prompt.js";
+import {
+  type CursorCommand,
+  discoverCommands,
+  expandCommand,
+  presentCommands,
+} from "./commands.js";
 import { type CursorSdk, loadCursorSdk, localStore } from "./sdk.js";
 import { TurnTimeline } from "./turn.js";
 
@@ -65,6 +71,12 @@ interface ActiveTurn {
   ended: boolean;
 }
 
+interface PendingPrompt {
+  prompt: ProviderPrompt;
+  /** Expanded command or skill text sent in place of the typed `/name args`. */
+  text?: string;
+}
+
 interface SessionOptions {
   id: string;
   config: ProviderSessionConfig;
@@ -78,7 +90,9 @@ export class CursorSession {
   private config: ProviderSessionConfig;
   private models: ModelListItem[] = [];
   private active: ActiveTurn | undefined;
-  private readonly queued: ProviderPrompt[] = [];
+  private readonly queued: PendingPrompt[] = [];
+  private commands: CursorCommand[] = [];
+  private publishedCommands: string | undefined;
   private freshConversation = true;
   private closed = false;
 
@@ -136,6 +150,7 @@ export class CursorSession {
         }
       }
     }
+    await this.refreshCommands();
     this.publishConfig();
     this.options.emit({
       type: "session.ready",
@@ -150,13 +165,47 @@ export class CursorSession {
       await this.steer(prompt);
       return;
     }
+    const pending = await this.resolvePrompt(prompt);
+    if (!pending) return;
     if (this.active) {
       // Cursor runs one turn at a time. The daemon cancels a turn before replacing it, so this
       // only covers a prompt that arrives while that turn is still unwinding.
-      this.queued.push(prompt);
+      this.queued.push(pending);
       return;
     }
-    this.startTurn(prompt);
+    this.startTurn(pending);
+  }
+
+  private async resolvePrompt(prompt: ProviderPrompt): Promise<PendingPrompt | undefined> {
+    if (prompt.input.type === "command") {
+      const { name, arguments: args } = prompt.input;
+      const command = this.commands.find((candidate) => candidate.name === name);
+      if (!command) {
+        this.promptFailed(prompt, { message: `Unknown command /${name}` });
+        return undefined;
+      }
+      return { prompt, text: await expandCommand(command, args.trim()) };
+    }
+    // The daemon turns `/name args` into a command only for plain-string prompts; clients that
+    // send content blocks (the CLI, attachments) arrive as messages, so match them here too.
+    const [only, ...rest] = prompt.input.content;
+    const typed =
+      rest.length === 0 && only?.type === "text" && !("mimeType" in only) ? only.text : "";
+    const match = /^\/(\S+)(?:\s+([\s\S]*))?$/.exec(typed.trim());
+    const command = match && this.commands.find((candidate) => candidate.name === match[1]);
+    if (!match || !command) return { prompt };
+    return { prompt, text: await expandCommand(command, (match[2] ?? "").trim()) };
+  }
+
+  // Commands and skills are files the user can add at any time; re-read them after each turn
+  // and publish only when the list changed.
+  private async refreshCommands(): Promise<void> {
+    this.commands = await discoverCommands(this.config.cwd);
+    const commands = presentCommands(this.commands);
+    const serialized = JSON.stringify(commands);
+    if (serialized === this.publishedCommands || this.closed) return;
+    this.publishedCommands = serialized;
+    this.options.emit({ type: "session.commands", sessionId: this.options.id, commands });
   }
 
   // A steer answers with exactly one result: `steer` when Cursor took the message into the
@@ -192,7 +241,7 @@ export class CursorSession {
   }
 
   async interrupt(): Promise<void> {
-    for (const prompt of this.queued.splice(0)) {
+    for (const { prompt } of this.queued.splice(0)) {
       this.promptFailed(prompt, { message: "Interrupted before this message was sent" });
     }
     const active = this.active;
@@ -233,7 +282,7 @@ export class CursorSession {
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
-    for (const prompt of this.queued.splice(0)) {
+    for (const { prompt } of this.queued.splice(0)) {
       this.promptFailed(prompt, { message: "The session closed before this message was sent" });
     }
     const active = this.active;
@@ -244,12 +293,13 @@ export class CursorSession {
     this.agent?.close();
   }
 
-  private startTurn(prompt: ProviderPrompt): void {
+  private startTurn({ prompt, text }: PendingPrompt): void {
     const agent = this.requireAgent();
     const turnId = randomUUID();
     const { display, message } = promptMessage(
       prompt,
       this.freshConversation ? this.config.systemPrompt : undefined,
+      text,
     );
     let settle: (run: Run | undefined) => void = () => {};
     const started = new Promise<Run | undefined>((resolve) => {
@@ -279,6 +329,7 @@ export class CursorSession {
       this.active = undefined;
       const next = this.queued.shift();
       if (next && !this.closed) this.startTurn(next);
+      void this.refreshCommands().catch(() => undefined);
     });
   }
 

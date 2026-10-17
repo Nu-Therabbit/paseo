@@ -33,11 +33,19 @@ It needs Node 22.13 or later on the daemon host.
 | Persistence and replay   | `Agent.resume()`; replay rebuilds text, reasoning, and tool rows from stored turns |
 | Steering                 | `run.steer()`; a message Cursor reverts fails the steer and Paseo falls back       |
 | Interrupt                | `run.cancel()`                                                                     |
+| Slash commands           | Commands and skills from Cursor's folders, expanded into the prompt when picked    |
 | Host tools               | `config.mcpServers`, passed on every create, resume, and send                      |
 | System prompt            | Prepended to the first message; Cursor's `systemPrompt` replaces its harness       |
 
 Local SDK agents run tools without approval prompts, so the provider has no permission flow and
 marks Agent as the unattended mode. Use Plan mode, or the provider options below, to restrict it.
+
+The SDK gives the model its skills as context but does not expand `/name` in message text, so the
+provider lists them itself. It reads `.cursor/commands` and `.claude/commands` (`<name>.md`) and the
+skill folders Cursor reads (`.cursor`, `.claude`, `.codex`, `.grok`, `.agents` under `skills/`, plus
+the built-in `~/.cursor/skills-cursor`), project before personal. A command's file becomes the
+prompt with the arguments after it; a skill is attached with its `SKILL.md`. The list refreshes after
+every turn.
 
 ## Provider options
 

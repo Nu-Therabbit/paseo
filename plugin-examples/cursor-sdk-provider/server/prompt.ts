@@ -8,7 +8,12 @@ export interface PromptMessage {
   message: SDKUserMessage;
 }
 
-export function promptMessage(prompt: ProviderPrompt, instructions?: string): PromptMessage {
+/** `body` replaces the typed text in the message, e.g. an expanded command or skill. */
+export function promptMessage(
+  prompt: ProviderPrompt,
+  instructions?: string,
+  body?: string,
+): PromptMessage {
   const content = prompt.input.type === "message" ? prompt.input.content : [];
   const display =
     prompt.input.type === "command"
@@ -19,9 +24,10 @@ export function promptMessage(prompt: ProviderPrompt, instructions?: string): Pr
   );
   // Cursor's `systemPrompt` option replaces its whole harness prompt and is gated per
   // account, so Paseo's instructions ride on the first message of a new conversation.
+  const sent = body ?? display;
   const text = instructions
-    ? `${INSTRUCTIONS_OPEN}\n${instructions}\n${INSTRUCTIONS_CLOSE}\n\n${display}`
-    : display;
+    ? `${INSTRUCTIONS_OPEN}\n${instructions}\n${INSTRUCTIONS_CLOSE}\n\n${sent}`
+    : sent;
   return { display, message: images.length > 0 ? { text, images } : { text } };
 }
 

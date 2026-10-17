@@ -15,6 +15,7 @@ import { CursorSession } from "./session.js";
 
 const CAPABILITIES = [
   "prompt.message",
+  "prompt.command",
   "prompt.image",
   "prompt.steer",
   "session.configure",
