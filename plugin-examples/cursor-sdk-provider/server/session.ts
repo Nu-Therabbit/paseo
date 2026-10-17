@@ -59,7 +59,10 @@ const providerOptionsSchema = z
 interface ActiveTurn {
   turnId: string;
   run: Run | undefined;
+  /** Settles once `agent.send()` returns the run, or with undefined when it fails. */
+  started: Promise<Run | undefined>;
   canceled: boolean;
+  ended: boolean;
 }
 
 interface SessionOptions {
@@ -143,35 +146,49 @@ export class CursorSession {
 
   async prompt(prompt: ProviderPrompt): Promise<void> {
     if (this.closed) throw new Error("Cursor session is closed");
-    const active = this.active;
-    if (!active) {
-      this.startTurn(prompt);
+    if (prompt.delivery === "steer") {
+      await this.steer(prompt);
       return;
     }
-    if (prompt.delivery === "steer" && active.run?.steer && prompt.input.type === "message") {
-      const { display, message } = promptMessage(prompt);
-      if (!message.images) {
-        const outcome = await active.run.steer(message.text);
-        if (outcome === "complete_delivered") {
-          this.emitItem({
-            type: "user_message",
-            id: `user:${randomUUID()}`,
-            text: display,
-            clientMessageId: prompt.clientMessageId,
-          });
-          this.options.emit({
-            type: "session.prompt_result",
-            sessionId: this.options.id,
-            clientMessageId: prompt.clientMessageId,
-            result: { type: "steer", turnId: active.turnId },
-          });
-          return;
-        }
-      }
+    if (this.active) {
+      // Cursor runs one turn at a time. The daemon cancels a turn before replacing it, so this
+      // only covers a prompt that arrives while that turn is still unwinding.
+      this.queued.push(prompt);
+      return;
     }
-    // Cursor runs one turn at a time; anything it did not take into the active turn
-    // becomes a follow-up turn once that one ends.
-    this.queued.push(prompt);
+    this.startTurn(prompt);
+  }
+
+  // A steer answers with exactly one result: `steer` when Cursor took the message into the
+  // active turn, `failed` otherwise. The daemon owns the fallback (a new or replacing turn),
+  // so a steer that Cursor reverts must never start a turn here.
+  private async steer(prompt: ProviderPrompt): Promise<void> {
+    const active = this.active;
+    // `agent.send()` can take seconds while Cursor loads rules, hooks and MCP servers; a steer
+    // sent in that window waits for the run instead of failing and replacing the turn.
+    const run = active ? (active.run ?? (await active.started)) : undefined;
+    const { display, message } = promptMessage(prompt);
+    const steerable =
+      this.active === active && run?.steer && prompt.input.type === "message" && !message.images;
+    const outcome = steerable ? await run.steer?.(message.text) : undefined;
+    if (!active || outcome !== "complete_delivered") {
+      this.promptFailed(prompt, {
+        message: "Cursor could not add this message to the running turn",
+      });
+      return;
+    }
+    this.emitItem({
+      type: "user_message",
+      id: `user:${randomUUID()}`,
+      text: display,
+      clientMessageId: prompt.clientMessageId,
+    });
+    this.options.emit({
+      type: "session.prompt_result",
+      sessionId: this.options.id,
+      clientMessageId: prompt.clientMessageId,
+      result: { type: "steer", turnId: active.turnId },
+    });
   }
 
   async interrupt(): Promise<void> {
@@ -181,7 +198,13 @@ export class CursorSession {
     const active = this.active;
     if (!active) return;
     active.canceled = true;
-    await active.run?.cancel();
+    if (active.run) {
+      await active.run.cancel();
+      return;
+    }
+    // `agent.send()` has not returned a run yet and can take seconds; end the turn now and
+    // cancel the run as soon as it exists.
+    this.endTurn(active, "canceled");
   }
 
   configure(changes: ProviderConfigChanges): void {
@@ -228,7 +251,11 @@ export class CursorSession {
       prompt,
       this.freshConversation ? this.config.systemPrompt : undefined,
     );
-    const active: ActiveTurn = { turnId, run: undefined, canceled: false };
+    let settle: (run: Run | undefined) => void = () => {};
+    const started = new Promise<Run | undefined>((resolve) => {
+      settle = resolve;
+    });
+    const active: ActiveTurn = { turnId, run: undefined, started, canceled: false, ended: false };
     this.active = active;
     this.emitItem({
       type: "user_message",
@@ -248,7 +275,7 @@ export class CursorSession {
       turnId,
       state: "started",
     });
-    void this.runTurn(agent, active, message).finally(() => {
+    void this.runTurn(agent, active, message, settle).finally(() => {
       this.active = undefined;
       const next = this.queued.shift();
       if (next && !this.closed) this.startTurn(next);
@@ -259,6 +286,7 @@ export class CursorSession {
     agent: SDKAgent,
     active: ActiveTurn,
     message: SDKUserMessage,
+    settle: (run: Run | undefined) => void,
   ): Promise<void> {
     const timeline = new TurnTimeline(this.options.id, active.turnId, this.options.emit);
     let result: RunResult | undefined;
@@ -269,11 +297,17 @@ export class CursorSession {
         mcpServers: mcpServers(this.config),
       });
       active.run = run;
+      settle(run);
       this.freshConversation = false;
-      if (active.canceled) await run.cancel();
+      if (active.canceled) {
+        await run.cancel();
+        this.endTurn(active, "canceled");
+        return;
+      }
       for await (const event of run.stream()) timeline.apply(event);
       result = await run.wait();
     } catch (error) {
+      settle(undefined);
       timeline.finish(undefined);
       this.endTurn(active, active.canceled ? "canceled" : "failed", providerError(error));
       return;
@@ -296,6 +330,9 @@ export class CursorSession {
     state: "completed" | "failed" | "canceled",
     error?: ProviderError,
   ): void {
+    // An interrupt before the run started already ended this turn.
+    if (active.ended) return;
+    active.ended = true;
     this.options.emit({
       type: "session.turn",
       sessionId: this.options.id,

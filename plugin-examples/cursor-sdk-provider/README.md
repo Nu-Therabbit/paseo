@@ -31,7 +31,7 @@ It needs Node 22.13 or later on the daemon host.
 | Composer settings        | Every other model parameter with more than one value                               |
 | Modes `agent` and `plan` | `mode` on every `agent.send()`                                                     |
 | Persistence and replay   | `Agent.resume()`; replay rebuilds text, reasoning, and tool rows from stored turns |
-| Steering                 | `run.steer()`; a message Cursor reverts runs as the next turn                      |
+| Steering                 | `run.steer()`; a message Cursor reverts fails the steer and Paseo falls back       |
 | Interrupt                | `run.cancel()`                                                                     |
 | Host tools               | `config.mcpServers`, passed on every create, resume, and send                      |
 | System prompt            | Prepended to the first message; Cursor's `systemPrompt` replaces its harness       |
