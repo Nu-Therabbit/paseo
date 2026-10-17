@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { evaluateBundle } from "./bundle-evaluator.js";
 import {
   compilePlugin,
   resolveExistingAsarUnpackedEsbuildBinary,
@@ -182,6 +183,121 @@ describe("plugin runtime entries", () => {
       'Could not resolve type dependency "missing-types"',
     );
   });
+
+  it("accepts installed dependencies whose declarations import unpublished types", async () => {
+    // Published SDKs (e.g. @cursor/sdk) ship declarations that import their own
+    // dev-only packages and unshipped vendor files.
+    const entries = await createSplitPlugin();
+    const dependency = path.join(entries.directory, "node_modules/published-sdk");
+    await mkdir(dependency, { recursive: true });
+    await writeFile(
+      path.join(dependency, "package.json"),
+      JSON.stringify({ name: "published-sdk", main: "index.js", types: "index.d.ts" }),
+    );
+    await writeFile(path.join(dependency, "index.js"), 'exports.label = "published sdk";');
+    await writeFile(
+      path.join(dependency, "index.d.ts"),
+      `import type { Client } from "@unpublished/agent-client";
+import type { Shared } from "./vendor/shared";
+export declare const label: string;
+export type Session = Client | Shared;`,
+    );
+    await writeFile(
+      entries.server,
+      'import { label } from "published-sdk"; export default function contribute() { return label; }',
+    );
+
+    const result = await compilePlugin({ client: null, server: entries.server });
+
+    expect(result.serverBundle).toContain("published sdk");
+  });
+
+  it("still rejects forbidden imports resolvable from dependency declarations", async () => {
+    const entries = await createSplitPlugin();
+    const dependency = path.join(entries.directory, "node_modules/leaky-sdk");
+    await mkdir(dependency, { recursive: true });
+    await writeFile(
+      path.join(dependency, "package.json"),
+      JSON.stringify({ name: "leaky-sdk", main: "index.js", types: "index.d.ts" }),
+    );
+    await writeFile(path.join(dependency, "index.js"), "exports.label = 'leaky';");
+    await writeFile(
+      path.join(dependency, "index.d.ts"),
+      `import type { Missing } from "@unpublished/agent-client";
+import type { PluginClientContext } from "@getpaseo/plugin/client";
+export declare const label: string;
+export type Context = PluginClientContext | Missing;`,
+    );
+    await writeFile(
+      entries.server,
+      'import { label } from "leaky-sdk"; export default function contribute() { return label; }',
+    );
+
+    await expect(compilePlugin({ client: null, server: entries.server })).rejects.toThrow(
+      "client-only module",
+    );
+  });
+
+  it("loads declared server externals from the plugin installation", async () => {
+    const entries = await createSplitPlugin();
+    const dependency = path.join(entries.directory, "node_modules/lazy-sdk");
+    await mkdir(path.join(dependency, "chunks"), { recursive: true });
+    await writeFile(
+      path.join(dependency, "package.json"),
+      JSON.stringify({ name: "lazy-sdk", main: "index.js" }),
+    );
+    // A runtime-only import and a computed chunk path: neither can be bundled.
+    await writeFile(
+      path.join(dependency, "index.js"),
+      `const path = require("node:path");
+exports.load = () => {
+  if (process.versions.bun) require("bun:sqlite");
+  return require(path.join(__dirname, "chunks", "agent.js"));
+};`,
+    );
+    await writeFile(
+      path.join(dependency, "chunks/agent.js"),
+      "exports.agent = 'lazy agent'; exports.loadedFrom = __dirname;",
+    );
+    await writeFile(
+      entries.server,
+      'import { load } from "lazy-sdk"; export default function contribute() { return load(); }',
+    );
+
+    const { serverBundle } = await compilePlugin(
+      { client: null, server: entries.server },
+      { serverExternals: ["lazy-sdk"] },
+    );
+
+    expect(serverBundle).not.toContain("lazy agent");
+    const contribute = evaluateBundle(serverBundle!, {
+      pluginDirectory: entries.directory,
+      serverExternals: ["lazy-sdk"],
+    });
+    expect(contribute(undefined as never)).toEqual({
+      agent: "lazy agent",
+      loadedFrom: realpathSync.native(path.join(dependency, "chunks")),
+    });
+  });
+
+  it("rejects a declared server external that is not installed in the plugin", async () => {
+    const entries = await createSplitPlugin();
+
+    await expect(
+      compilePlugin({ client: null, server: entries.server }, { serverExternals: ["lazy-sdk"] }),
+    ).rejects.toThrow('Server external "lazy-sdk" is not installed in the plugin directory');
+  });
+
+  it.each(["zod", "@getpaseo/plugin", "fs"])(
+    "rejects host module %s as a server external",
+    async (specifier) => {
+      const entries = await createSplitPlugin();
+
+      await expect(
+        compilePlugin({ client: null, server: entries.server }, { serverExternals: [specifier] }),
+      ).rejects.toThrow(`Server external "${specifier}" is provided by Paseo`);
+    },
+  );
 
   it.each([
     "react",

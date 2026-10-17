@@ -285,6 +285,17 @@ import to any other code file in the plugin root is also rejected; move it into 
 or `shared/`. These are compile errors naming the importing file and boundary rule. Top-level React
 Native calls such as `StyleSheet.create` belong in `client/`.
 
+The boundary scan follows type edges into installed dependencies, so a leaked client type in a
+package's declarations still fails. An unresolved type import fails only in plugin-authored files:
+published SDKs such as `@cursor/sdk` ship declarations that import their own unpublished dev
+packages, and requiring those would reject packages that work at runtime.
+
+`server.externals` in the manifest leaves packages out of the server bundle. The bundle evaluator
+resolves them with a `require` anchored at the plugin directory, not the daemon's, so the package
+loads its own lazy chunks from its own installation. The compiler rejects an external that shadows a
+host module, since the host map must keep supplying the single shared SDK and `zod` instances. The
+author-facing contract is in the [public reference](../public-docs/plugins/reference.md#server-runtime).
+
 The scaffold omits `"DOM"` from `tsconfig.json` and does not use `/// <reference lib="dom" />`, so
 browser globals are not available across the plugin. Put sanctioned web-only APIs in
 `client/web.ts`, declare only the globals that module uses, gate each export with

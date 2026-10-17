@@ -22,6 +22,10 @@ const PluginAssetPathSchema = z
       value.split("/").at(-1) !== ".",
     "Expected a relative file path inside the plugin package",
   );
+// An external covers its package's subpaths, so only bare npm package names are accepted.
+const PluginServerExternalSchema = z
+  .string()
+  .regex(/^(?:@[a-z0-9][a-z0-9._~-]*\/)?[a-z0-9][a-z0-9._~-]*$/, "Expected an npm package name");
 const PluginManifestSchema = z.object({
   id: PluginIdSchema,
   name: z.string().trim().min(1).optional(),
@@ -34,6 +38,11 @@ const PluginManifestSchema = z.object({
   // A misspelled requirement must not silently disable compatibility checks.
   requirements: PluginRequirementsSchema.strict().optional(),
   build: z.array(PluginBuildCommandSchema).min(1).optional(),
+  // A misspelled key would silently bundle a dependency the author meant to leave external.
+  server: z
+    .object({ externals: z.array(PluginServerExternalSchema).optional() })
+    .strict()
+    .optional(),
 });
 
 export type PluginManifest = z.infer<typeof PluginManifestSchema>;

@@ -146,4 +146,30 @@ describe("plugin manifest", () => {
       await expect(readPluginManifest(directory)).rejects.toThrow();
     }
   });
+
+  it("accepts only package names as server externals", async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), "paseo-plugin-manifest-"));
+    directories.push(directory);
+    const manifest = path.join(directory, "paseo-plugin.json");
+
+    await writeFile(
+      manifest,
+      JSON.stringify({ id: "cursor", server: { externals: ["@cursor/sdk", "better-sqlite3"] } }),
+    );
+    await expect(readPluginManifest(directory)).resolves.toMatchObject({
+      server: { externals: ["@cursor/sdk", "better-sqlite3"] },
+    });
+
+    for (const server of [
+      { externals: [""] },
+      { externals: ["./server/sdk"] },
+      { externals: ["@cursor/sdk/subpath"] },
+      { externals: ["node:fs"] },
+      { externals: "@cursor/sdk" },
+      { external: ["@cursor/sdk"] },
+    ]) {
+      await writeFile(manifest, JSON.stringify({ id: "cursor", server }));
+      await expect(readPluginManifest(directory)).rejects.toThrow();
+    }
+  });
 });

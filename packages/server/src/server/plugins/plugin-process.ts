@@ -565,7 +565,11 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     const parsed = PluginProcessRequestSchema.safeParse(raw);
     if (!worker && parsed.success && parsed.data.type === "initialize") {
       try {
-        worker = createPluginWorker({ channel, contribute: evaluateBundle(parsed.data.bundle) });
+        const contribute = evaluateBundle(parsed.data.bundle, {
+          pluginDirectory: parsed.data.pluginDirectory,
+          serverExternals: parsed.data.serverExternals ?? [],
+        });
+        worker = createPluginWorker({ channel, contribute });
       } catch (error) {
         channel.send({ type: "fatal", error: describeError(error) });
         return;

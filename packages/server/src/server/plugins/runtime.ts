@@ -352,13 +352,17 @@ export class PluginRuntime {
       throw new Error(`Built-in plugin ${input.id} has manifest ID ${manifest.id}`);
     }
     assertPluginCompatibility({ ...manifest, version: this.daemonVersion, runtime: "daemon" });
-    const bundles = await compilePlugin(await resolveEntryPaths(directory));
+    const serverExternals = manifest.server?.externals ?? [];
+    const bundles = await compilePlugin(await resolveEntryPaths(directory), { serverExternals });
     if (!bundles.serverBundle) throw new Error(`Built-in plugin ${input.id} needs a server entry`);
     const loaded = await this.launchPlugin({
       pluginId: input.id,
       pluginDirectory: directory,
+      serverExternals,
       requirements: manifest.requirements,
-      child: new InternalPluginChild(evaluateBundle(bundles.serverBundle)),
+      child: new InternalPluginChild(
+        evaluateBundle(bundles.serverBundle, { pluginDirectory: directory, serverExternals }),
+      ),
       bundle: "",
       clientBundle: bundles.clientBundle ?? "",
     });
@@ -371,7 +375,7 @@ export class PluginRuntime {
     const manifest = await readPluginManifest(directory);
     assertPluginCompatibility({ ...manifest, version: this.daemonVersion, runtime: "daemon" });
     const entryPaths = await resolveEntryPaths(directory);
-    await compilePlugin(entryPaths);
+    await compilePlugin(entryPaths, { serverExternals: manifest.server?.externals });
   }
 
   async stopPluginById(pluginId: string): Promise<boolean> {
@@ -636,7 +640,8 @@ export class PluginRuntime {
     const manifest = await readPluginManifest(directory);
     assertPluginCompatibility({ ...manifest, version: this.daemonVersion, runtime: "daemon" });
     const entryPaths = await resolveEntryPaths(directory);
-    const bundles = await compilePlugin(entryPaths);
+    const serverExternals = manifest.server?.externals ?? [];
+    const bundles = await compilePlugin(entryPaths, { serverExternals });
     const serverBundle = bundles.serverBundle;
     if (!serverBundle) {
       return {
@@ -659,6 +664,7 @@ export class PluginRuntime {
     return this.launchPlugin({
       pluginId,
       pluginDirectory: directory,
+      serverExternals,
       requirements: manifest.requirements,
       child: this.spawnChild(),
       bundle: serverBundle,
@@ -669,6 +675,7 @@ export class PluginRuntime {
   private async launchPlugin(input: {
     pluginId: string;
     pluginDirectory: string;
+    serverExternals: string[];
     requirements: PluginRequirements | undefined;
     child: PluginChild;
     bundle: string;
@@ -753,6 +760,7 @@ export class PluginRuntime {
             type: "initialize",
             pluginId,
             pluginDirectory: input.pluginDirectory,
+            serverExternals: input.serverExternals,
             appVersion: this.daemonVersion,
             bundle,
             settingsDirectory: this.dependencies.settingsDirectory

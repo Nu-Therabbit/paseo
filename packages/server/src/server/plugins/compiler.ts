@@ -92,6 +92,13 @@ function containsPath(directory: string, filePath: string): boolean {
   return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
+function isPluginAuthored(filePath: string, pluginDirectory: string): boolean {
+  return (
+    containsPath(pluginDirectory, filePath) &&
+    !path.relative(pluginDirectory, filePath).split(path.sep).includes("node_modules")
+  );
+}
+
 function dependencyName(specifier: string): string {
   const segments = specifier.split("/");
   return specifier.startsWith("@") ? segments.slice(0, 2).join("/") : segments[0];
@@ -209,7 +216,9 @@ function createRuntimeBoundaryPlugin(target: PluginBuildTarget, pluginDirectory:
         const dependencyFiles = new Set<string>();
         if (declaration && (typeOnly || /\.d\.[cm]?ts$/.test(declaration)))
           dependencyFiles.add(declaration);
-        if (typeOnly && !declaration) {
+        // Published declarations may import their package's dev-only types. Those edges
+        // carry no runtime code, so only the plugin's own unresolved type imports fail.
+        if (typeOnly && !declaration && isPluginAuthored(file, pluginDirectory)) {
           throw new Error(`Could not resolve type dependency "${specifier}" imported by ${file}`);
         }
         if (!typeOnly && kind !== "type-reference") {
@@ -383,11 +392,34 @@ function checkSharedDependencies(inputs: Metafile["inputs"], pluginDirectory: st
   }
 }
 
-async function compileTarget(entryPath: string, target: PluginBuildTarget): Promise<string> {
+// The evaluator resolves externals with a require anchored at the plugin directory,
+// so each one must be installed there and must not shadow a host-provided module.
+function assertServerExternals(serverExternals: readonly string[], pluginDirectory: string): void {
+  const pluginRequire = createRequire(path.join(pluginDirectory, "package.json"));
+  for (const name of serverExternals) {
+    if (
+      isBuiltin(name) ||
+      SERVER_HOST_MODULES.some((host) => host === name || host.startsWith(`${name}/`))
+    ) {
+      throw new Error(`Server external "${name}" is provided by Paseo`);
+    }
+    const lookupPaths = pluginRequire.resolve.paths(name) ?? [];
+    if (!lookupPaths.some((directory) => existsSync(path.join(directory, name, "package.json")))) {
+      throw new Error(`Server external "${name}" is not installed in the plugin directory`);
+    }
+  }
+}
+
+async function compileTarget(
+  entryPath: string,
+  target: PluginBuildTarget,
+  serverExternals: readonly string[],
+): Promise<string> {
   const { build } = loadEsbuild();
   // Use native canonical paths throughout: TypeScript expands Windows short names
   // when resolving type references, while the JS realpath implementation retains them.
   const pluginDirectory = realpathSync.native(path.dirname(entryPath));
+  if (target === "server") assertServerExternals(serverExternals, pluginDirectory);
   const result = await build({
     entryPoints: [realpathSync.native(entryPath)],
     bundle: true,
@@ -414,7 +446,7 @@ async function compileTarget(entryPath: string, target: PluginBuildTarget): Prom
             "react-native",
             "zod",
           ]
-        : SERVER_HOST_MODULES,
+        : [...SERVER_HOST_MODULES, ...serverExternals],
     plugins: [createRuntimeBoundaryPlugin(target, pluginDirectory)],
     metafile: true,
     logLevel: "silent",
@@ -427,16 +459,20 @@ async function compileTarget(entryPath: string, target: PluginBuildTarget): Prom
   return wrapCommonJsBundle(makeHermesInteropEager(output));
 }
 
-export async function compilePlugin(entryPaths: {
-  client: string | null;
-  server: string | null;
-}): Promise<{
+export async function compilePlugin(
+  entryPaths: {
+    client: string | null;
+    server: string | null;
+  },
+  options: { serverExternals?: readonly string[] } = {},
+): Promise<{
   clientBundle: string | null;
   serverBundle: string | null;
 }> {
+  const serverExternals = options.serverExternals ?? [];
   const [clientBundle, serverBundle] = await Promise.all([
-    entryPaths.client ? compileTarget(entryPaths.client, "client") : null,
-    entryPaths.server ? compileTarget(entryPaths.server, "server") : null,
+    entryPaths.client ? compileTarget(entryPaths.client, "client", []) : null,
+    entryPaths.server ? compileTarget(entryPaths.server, "server", serverExternals) : null,
   ]);
   return { clientBundle, serverBundle };
 }

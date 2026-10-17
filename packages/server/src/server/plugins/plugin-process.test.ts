@@ -40,11 +40,27 @@ it("keeps React out of the plugin host's runtime dependency graph", async () => 
 
 it("exposes CLI probes through the plugin host's server SDK", async () => {
   const { evaluateBundle } = await import("./bundle-evaluator.js");
-  const setup = evaluateBundle(`(require) => ({ default: async () => {
+  const setup = evaluateBundle(
+    `(require) => ({ default: async () => {
     const { execCommand } = require("@getpaseo/plugin/server");
     const { stdout } = await execCommand(${JSON.stringify(process.execPath)}, ["-e", "process.stdout.write('plugin CLI ready')"]);
     if (stdout !== "plugin CLI ready") throw new Error("CLI output was lost");
-  } })`);
+  } })`,
+    { pluginDirectory: process.cwd(), serverExternals: [] },
+  );
   // This contribution uses no server context APIs; it exercises the host's real SDK binding.
   await expect(setup(undefined as never)).resolves.toBeUndefined();
+});
+
+it("carries declared server externals in the subprocess initialize request", async () => {
+  const { PluginProcessRequestSchema } = await import("./plugin-process-protocol.js");
+  const request = {
+    type: "initialize",
+    pluginId: "cursor",
+    bundle: "",
+    appVersion: "0.0.0",
+    pluginDirectory: "/plugins/cursor",
+    serverExternals: ["@cursor/sdk"],
+  };
+  expect(PluginProcessRequestSchema.parse(request)).toEqual(request);
 });

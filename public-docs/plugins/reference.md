@@ -61,6 +61,7 @@ The required root manifest is `paseo-plugin.json`:
 | `description`  | No       | Non-empty summary shown below the plugin ID in **Settings → Plugins**.                    |
 | `requirements` | No       | Supported Paseo versions, described below.                                                |
 | `build`        | No       | Preparation commands, described in the CLI reference.                                     |
+| `server`       | No       | Server runtime options: `externals`, described in [Server runtime](#server-runtime).      |
 
 Paths are relative to `paseo-plugin.json`, use forward slashes, and cannot contain `..`
 segments. Registry listings for visual plugins require an interface image even though `media` is
@@ -309,6 +310,30 @@ Paseo provides `@getpaseo/plugin`, `@getpaseo/plugin/server`,
 contributions run in a daemon subprocess with Node access to the host machine. Keep filesystem,
 process, credential, and other machine-local work under `server/`. A plugin without
 `index.server.ts` starts no subprocess.
+
+Paseo bundles the server entry with every dependency it imports. Some packages cannot be bundled:
+they load their own files from computed paths, import runtime-specific modules such as
+`bun:sqlite`, or ship native addons. List those packages in `server.externals` so the server bundle
+leaves them as `require` calls and the subprocess loads them from the plugin directory:
+
+```json
+{
+  "id": "cursor-agent",
+  "requirements": { "paseo": ">=0.12.0" },
+  "server": { "externals": ["@cursor/sdk"] }
+}
+```
+
+Each entry is a package name; it covers the package's subpaths. Install every external in the
+plugin directory, for example with `npm install` or a [`build`](#cli-reference) command, and keep its
+`node_modules` in the installed plugin. Compilation fails when an external is missing or names a
+module Paseo provides (`@getpaseo/plugin`, `zod`, or a Node built-in). Externals apply to server
+code only; client bundles stay self-contained. An external runs on the daemon's Node version, so
+check the package's `engines` range.
+
+A dependency's declaration files may import types the package does not publish, such as its own
+development packages. Paseo ignores those unresolved type imports inside `node_modules`. Unresolved
+type imports in your plugin's own files still fail compilation.
 
 ### Providers
 
