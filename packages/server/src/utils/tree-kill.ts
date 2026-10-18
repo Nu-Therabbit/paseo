@@ -38,14 +38,18 @@ export async function terminateWithTreeKill(
   }
 
   const exitPromise = waitForProcessExit(child);
-  await signalProcessTree(child, options.gracefulSignal ?? "SIGTERM");
+  // tree-kill's callback waits for `taskkill /T`, which blocks for about a minute on
+  // some Windows hosts (getpaseo/paseo#6233). The timeouts bound each whole step, so
+  // the signals are sent without waiting for that callback.
+  void signalProcessTree(child, options.gracefulSignal ?? "SIGTERM");
   if (await waitForExitOrTimeout(exitPromise, options.gracefulTimeoutMs)) {
     return "terminated";
   }
 
   options.onForceSignal?.();
-  await signalProcessTree(child, options.forceSignal ?? "SIGKILL");
+  const forceSignal = signalProcessTree(child, options.forceSignal ?? "SIGKILL");
   if (options.forceTimeoutMs === undefined) {
+    await forceSignal;
     return "killed";
   }
   return (await waitForExitOrTimeout(exitPromise, options.forceTimeoutMs))
